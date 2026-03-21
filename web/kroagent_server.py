@@ -147,12 +147,14 @@ body {
   background: #161b22; padding: 10px 16px;
   border-top: 1px solid #30363d; display: flex; gap: 8px; flex-shrink: 0;
 }
-#input-bar input {
+#input-bar textarea {
   flex: 1; background: #0d1117; border: 1px solid #30363d;
   color: #c9d1d9; padding: 8px 12px; border-radius: 6px;
   font-family: inherit; font-size: 14px; outline: none;
+  resize: none; min-height: 40px; max-height: 200px;
+  line-height: 1.5; overflow-y: auto;
 }
-#input-bar input:focus { border-color: #58a6ff; }
+#input-bar textarea:focus { border-color: #58a6ff; }
 #input-bar button {
   background: #238636; color: white; border: none;
   padding: 8px 16px; border-radius: 6px; cursor: pointer;
@@ -200,7 +202,7 @@ body {
 
 <div id="terminal"></div>
 <div id="input-bar">
-  <input type="text" id="msg-input" placeholder="Type a message..." autocomplete="off">
+  <textarea id="msg-input" placeholder="Type a message..." autocomplete="off" rows="1"></textarea>
   <button id="send-btn" onclick="sendMessage()">Send</button>
 </div>
 
@@ -351,7 +353,15 @@ async function sendMessage() {
 }
 
 inputEl.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !sendBtn.disabled) sendMessage();
+  if (e.key === 'Enter' && !e.shiftKey && !sendBtn.disabled) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
 });
 
 // Initial load
