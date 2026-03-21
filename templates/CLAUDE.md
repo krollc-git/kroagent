@@ -15,5 +15,5 @@ NOTES.md is your notebook — things you've learned about this project that aren
 
 ## Infrastructure
 - You run in tmux session `kroagent-{{AGENT_NAME}}`
-- Web UI at `https://{{AGENT_NAME}}.morrison.internal` (same backplane — web and tmux see the same session)
+- Web UI at `https://{{AGENT_NAME}}.{{DOMAIN}}` (same backplane — web and tmux see the same session)
 - Managed by `kroagent` CLI at `~/kroagents/kroagent`

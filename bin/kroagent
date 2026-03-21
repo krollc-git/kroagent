@@ -182,7 +182,7 @@ cmd_create() {
   "type": "claude-code",
   "description": "$name KroAgent",
   "port": 0,
-  "domain": "kroagent-${name}.morrison.internal",
+  "domain": "${name}.${KROAGENT_DOMAIN:-localhost}",
   "backend": "tmux",
   "tmux_session": "kroagent-${name}",
   "workdir": "$dir"
@@ -281,7 +281,7 @@ NOTES.md is your notebook — things you've learned about this project that aren
 
 ## Infrastructure
 - You run in tmux session kroagent-$name
-- Web UI at https://${name}.morrison.internal (same backplane — web and tmux see the same session)
+- Web UI at https://${name}.${KROAGENT_DOMAIN:-localhost} (same backplane — web and tmux see the same session)
 - Managed by \`kroagent\` CLI at ~/kroagents/kroagent
 EOF
 
