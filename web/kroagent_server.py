@@ -96,6 +96,18 @@ def send_to_pane(text):
         return False
 
 
+def send_key_to_pane(key):
+    """Send a raw tmux key (Escape, C-c, Enter, etc.) without appending Enter."""
+    try:
+        subprocess.run(
+            ["tmux", "send-keys", "-t", TMUX_SESSION, key],
+            capture_output=True, text=True, timeout=5
+        )
+        return True
+    except Exception:
+        return False
+
+
 def get_session_status():
     try:
         result = subprocess.run(
@@ -186,6 +198,10 @@ body {
   <h1>AGENT_NAME_PLACEHOLDER</h1>
   <span class="status" id="status">checking...</span>
   <div class="controls">
+    <button onclick="sendKey('Escape')" title="Send Escape">Esc</button>
+    <button onclick="sendKey('C-c')" title="Send Ctrl+C">Ctrl+C</button>
+    <button onclick="sendKey('Enter')" title="Send Enter">Enter</button>
+    <button onclick="sendKey('Space')" title="Send Space">Space</button>
     <button onclick="refreshBuffer()">Refresh</button>
     <button onclick="toggleAutoRefresh()" id="auto-btn">Auto: ON</button>
   </div>
@@ -352,6 +368,20 @@ async function sendMessage() {
   inputEl.focus();
 }
 
+async function sendKey(key) {
+  try {
+    await fetch('/key', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({key: key, device_id: deviceId})
+    });
+    setTimeout(refreshBuffer, 300);
+    setTimeout(refreshBuffer, 1000);
+  } catch(e) {
+    console.error('Key error:', e);
+  }
+}
+
 inputEl.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey && !sendBtn.disabled) {
     e.preventDefault();
@@ -457,6 +487,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(503, {"error": "session not running"})
                 return
             ok = send_to_pane(text)
+            self._json(200, {"sent": ok})
+
+        elif parsed.path == "/key":
+            device_id = body.get("device_id", "")
+            if not _is_paired(device_id):
+                self._json(403, {"error": "not paired"})
+                return
+            key = body.get("key", "")
+            allowed = {"Escape", "C-c", "Enter", "Space", "Up", "Down", "Left", "Right"}
+            if key not in allowed:
+                self._json(400, {"error": f"key not allowed: {key}"})
+                return
+            if not get_session_status():
+                self._json(503, {"error": "session not running"})
+                return
+            ok = send_key_to_pane(key)
             self._json(200, {"sent": ok})
 
         else:
