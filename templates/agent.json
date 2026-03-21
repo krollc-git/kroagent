@@ -1,0 +1,10 @@
+{
+  "name": "{{AGENT_NAME}}",
+  "type": "claude-code",
+  "description": "{{AGENT_NAME}} KroAgent",
+  "port": 0,
+  "domain": "{{AGENT_NAME}}.morrison.internal",
+  "backend": "tmux",
+  "tmux_session": "kroagent-{{AGENT_NAME}}",
+  "workdir": "{{WORKDIR}}"
+}

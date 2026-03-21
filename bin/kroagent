@@ -1,0 +1,373 @@
+#!/bin/bash
+# kroagent — manage KroAgent instances
+set -e
+
+KROAGENTS_DIR="$HOME/kroagents"
+
+usage() {
+    echo "Usage: kroagent <command> [agent-name]"
+    echo ""
+    echo "Commands:"
+    echo "  start <name>    Start an agent (tmux session + web server)"
+    echo "  stop <name>     Stop an agent"
+    echo "  restart <name>  Restart an agent"
+    echo "  status          Show all agents and their state"
+    echo "  list            List all configured agents"
+    echo "  attach <name>   Attach to agent's tmux session"
+    echo "  approve <name> [id] Approve a pending device (or list pending)"
+    echo "  create <name>   Scaffold a new agent workspace"
+    echo ""
+}
+
+get_config() {
+    local name="$1"
+    local key="$2"
+    python3 -c "import json; d=json.load(open('$KROAGENTS_DIR/$name/agent.json')); print(d.get('$key',''))"
+}
+
+agent_exists() {
+    [ -f "$KROAGENTS_DIR/$1/agent.json" ]
+}
+
+start_claude_agent() {
+    local name="$1"
+    local tmux_session=$(get_config "$name" "tmux_session")
+    local workdir=$(get_config "$name" "workdir")
+    local port=$(get_config "$name" "port")
+
+    # Start tmux session with Claude Code if not running
+    if ! tmux has-session -t "$tmux_session" 2>/dev/null; then
+        echo "Starting Claude Code session: $tmux_session"
+        tmux new-session -d -s "$tmux_session" -c "$workdir" \
+            "claude --dangerously-skip-permissions"
+        sleep 3
+    else
+        echo "Tmux session $tmux_session already running"
+    fi
+
+    # Start web server if not running
+    if ! pgrep -f "KROAGENT_TMUX_SESSION=$tmux_session.*kroagent_server" >/dev/null 2>&1; then
+        echo "Starting web server on port $port"
+        KROAGENT_PORT=$port \
+        KROAGENT_TMUX_SESSION=$tmux_session \
+        KROAGENT_NAME=$name \
+        nohup python3 "$KROAGENTS_DIR/web/kroagent_server.py" \
+            > "/tmp/kroagent-${name}-web.log" 2>&1 &
+        echo "Web server PID: $!"
+    else
+        echo "Web server already running"
+    fi
+}
+
+stop_claude_agent() {
+    local name="$1"
+    local tmux_session=$(get_config "$name" "tmux_session")
+
+    # Stop web server
+    pkill -f "KROAGENT_TMUX_SESSION=$tmux_session.*kroagent_server" 2>/dev/null || true
+
+    # Don't kill tmux — session persists for reattach
+    echo "Stopped web server for $name (tmux session $tmux_session preserved)"
+    echo "To kill tmux session: tmux kill-session -t $tmux_session"
+}
+
+start_llm_agent() {
+    local name="$1"
+    local service=$(get_config "$name" "systemd_service")
+
+    if [ -n "$service" ]; then
+        systemctl --user start "$service" 2>/dev/null || echo "Service $service already running or not found"
+    fi
+    echo "LLM agent $name managed by systemd service: $service"
+}
+
+stop_llm_agent() {
+    local name="$1"
+    local service=$(get_config "$name" "systemd_service")
+
+    if [ -n "$service" ]; then
+        systemctl --user stop "$service" 2>/dev/null || true
+    fi
+    echo "Stopped LLM agent $name"
+}
+
+cmd_start() {
+    local name="$1"
+    [ -z "$name" ] && { echo "Usage: kroagent start <name>"; exit 1; }
+    agent_exists "$name" || { echo "Agent '$name' not found"; exit 1; }
+
+    local type=$(get_config "$name" "type")
+    case "$type" in
+        claude-code) start_claude_agent "$name" ;;
+        local-llm)   start_llm_agent "$name" ;;
+        *) echo "Unknown agent type: $type"; exit 1 ;;
+    esac
+}
+
+cmd_stop() {
+    local name="$1"
+    [ -z "$name" ] && { echo "Usage: kroagent stop <name>"; exit 1; }
+    agent_exists "$name" || { echo "Agent '$name' not found"; exit 1; }
+
+    local type=$(get_config "$name" "type")
+    case "$type" in
+        claude-code) stop_claude_agent "$name" ;;
+        local-llm)   stop_llm_agent "$name" ;;
+    esac
+}
+
+cmd_restart() {
+    local name="$1"
+    cmd_stop "$name"
+    sleep 2
+    cmd_start "$name"
+}
+
+cmd_status() {
+    printf "%-20s %-12s %-10s %-8s %s\n" "AGENT" "TYPE" "TMUX" "WEB" "DOMAIN"
+    printf "%-20s %-12s %-10s %-8s %s\n" "-----" "----" "----" "---" "------"
+
+    for dir in "$KROAGENTS_DIR"/*/; do
+        [ -f "$dir/agent.json" ] || continue
+        local name=$(basename "$dir")
+        local type=$(get_config "$name" "type")
+        local domain=$(get_config "$name" "domain")
+        local tmux_status="—"
+        local web_status="—"
+
+        if [ "$type" = "claude-code" ]; then
+            local tmux_session=$(get_config "$name" "tmux_session")
+            tmux has-session -t "$tmux_session" 2>/dev/null && tmux_status="✓" || tmux_status="✗"
+            local port=$(get_config "$name" "port")
+            curl -s -o /dev/null "http://127.0.0.1:$port/status" 2>/dev/null && web_status="✓" || web_status="✗"
+        elif [ "$type" = "local-llm" ]; then
+            local port=$(get_config "$name" "port")
+            curl -s -o /dev/null "http://127.0.0.1:$port/" 2>/dev/null && web_status="✓" || web_status="✗"
+        fi
+
+        printf "%-20s %-12s %-10s %-8s %s\n" "$name" "$type" "$tmux_status" "$web_status" "$domain"
+    done
+}
+
+cmd_list() {
+    for dir in "$KROAGENTS_DIR"/*/; do
+        [ -f "$dir/agent.json" ] || continue
+        local name=$(basename "$dir")
+        local desc=$(get_config "$name" "description")
+        echo "$name — $desc"
+    done
+}
+
+cmd_attach() {
+    local name="$1"
+    [ -z "$name" ] && { echo "Usage: kroagent attach <name>"; exit 1; }
+    agent_exists "$name" || { echo "Agent '$name' not found"; exit 1; }
+
+    local tmux_session=$(get_config "$name" "tmux_session")
+    [ -z "$tmux_session" ] && { echo "Agent '$name' has no tmux session"; exit 1; }
+
+    exec tmux attach-session -t "$tmux_session"
+}
+
+cmd_create() {
+    local name="$1"
+    [ -z "$name" ] && { echo "Usage: kroagent create <name>"; exit 1; }
+
+    local dir="$KROAGENTS_DIR/$name"
+    mkdir -p "$dir/skills"
+
+    cat > "$dir/agent.json" << EOF
+{
+  "name": "$name",
+  "type": "claude-code",
+  "description": "$name KroAgent",
+  "port": 0,
+  "domain": "kroagent-${name}.morrison.internal",
+  "backend": "tmux",
+  "tmux_session": "kroagent-${name}",
+  "workdir": "$dir"
+}
+EOF
+
+    cat > "$dir/SOUL.md" << 'SOULEOF'
+# KroAgent: AGENT_NAME_PLACEHOLDER
+
+## Behavior
+
+- **Be concise.** Skip filler like "Great question!" or "I'd be happy to help!" — just do the work.
+- **Be resourceful before asking.** Read files, check context, search. Come back with answers, not questions.
+- **Have opinions.** If something is a bad idea, say so. If there's a better approach, suggest it.
+- **Don't over-engineer.** Do what was asked. A bug fix doesn't need surrounding code cleaned up.
+- **No trailing summaries.** Don't recap what you just did — the user can see the output.
+
+## Coding Style
+
+- **Python**: Use modern tooling — `uv` for packages, `ruff` for linting/formatting, type hints where they add clarity.
+- **Security**: Follow Trail of Bits guidance. No command injection, no unsanitized inputs at system boundaries.
+- **Keep it simple.** Three similar lines is better than a premature abstraction. Don't create helpers for one-time operations.
+- **Don't add what wasn't asked for.** No extra docstrings, comments, type annotations, or error handling for scenarios that can't happen.
+
+## Institutional Knowledge
+
+You build up project knowledge over time, like an employee would. To persist what you learn across sessions:
+
+- **NOTES.md** in your workspace is your notebook. Read it on every session start.
+- When you learn something non-obvious about the project — a gotcha, a workaround, a design decision, how something actually works vs how it looks — add it to NOTES.md.
+- Don't dump everything in there. Only save things that would save you (or a replacement) time in the future. If it's in the code or obvious from reading files, skip it.
+- Keep NOTES.md organized by topic, not chronologically. Update or remove entries that become stale.
+- Before a long session ends or when you've made significant progress, review and update NOTES.md.
+
+## Skills
+
+You have access to skills that extend your capabilities.
+
+- **Local skills** (this agent only): `~/kroagents/AGENT_NAME_PLACEHOLDER/skills/`
+- **Global skills** (all KroAgents): `~/kroagents/skills/`
+
+List available skills: `ls ~/kroagents/skills/ ~/kroagents/AGENT_NAME_PLACEHOLDER/skills/ 2>/dev/null`
+
+### Skill Format
+
+Each skill is a directory containing a `SKILL.md` file:
+
+```
+skills/
+  my-skill/
+    SKILL.md
+    (optional supporting files)
+```
+
+`SKILL.md` uses YAML frontmatter + markdown body:
+
+```markdown
+---
+name: my-skill
+description: One-line description of what this skill does
+user_invocable: true  # optional, if the user can invoke it directly
+---
+
+Instructions for how to use this skill, including any commands,
+APIs, workflows, or domain knowledge.
+```
+
+### Using Skills
+- When you encounter an unfamiliar task, check both skill directories for relevant skills
+- Read the SKILL.md before attempting the task
+- Follow the instructions in the skill file
+
+### Creating Skills
+- When you learn a reusable workflow, save it as a skill
+- Put agent-specific skills in your local `skills/` directory
+- Put skills useful to all agents in `~/kroagents/skills/`
+- Always include the YAML frontmatter with name and description
+SOULEOF
+    sed -i "s/AGENT_NAME_PLACEHOLDER/$name/g" "$dir/SOUL.md"
+
+    cat > "$dir/CLAUDE.md" << EOF
+# KroAgent: $name
+
+You are a KroAgent — a long-running Claude Code instance dedicated to a specific task.
+
+## On Session Start
+1. Read your SOUL.md: ~/kroagents/$name/SOUL.md
+2. Read your NOTES.md (if it exists): ~/kroagents/$name/NOTES.md
+3. Check for available skills: \`ls ~/kroagents/skills/ ~/kroagents/$name/skills/ 2>/dev/null\`
+
+## Identity
+Your full identity, behavior guidelines, and skill framework are in SOUL.md. Read it first.
+
+## Institutional Knowledge
+NOTES.md is your notebook — things you've learned about this project that aren't obvious from the code. Read it on startup, update it when you learn something worth remembering.
+
+## Infrastructure
+- You run in tmux session kroagent-$name
+- Web UI at https://${name}.morrison.internal (same backplane — web and tmux see the same session)
+- Managed by \`kroagent\` CLI at ~/kroagents/kroagent
+EOF
+
+    echo "Created agent workspace at $dir"
+    echo "Edit agent.json to set port and other config"
+}
+
+cmd_approve() {
+    local name="$1"
+    local device_id="$2"
+    [ -z "$name" ] && { echo "Usage: kroagent approve <name> [device-id]"; exit 1; }
+
+    local data_dir="${HOME}/.config/kroagents"
+    local devices_file="$data_dir/paired_devices_${name}.json"
+
+    if [ ! -f "$devices_file" ]; then
+        echo "No pairing data for agent '$name'"
+        exit 1
+    fi
+
+    if [ -z "$device_id" ]; then
+        # List pending devices
+        echo "Pending devices for $name:"
+        python3 -c "
+import json
+d = json.load(open('$devices_file'))
+pending = d.get('pending', {})
+if not pending:
+    print('  (none)')
+else:
+    for did, info in pending.items():
+        print(f'  {did[:8]}  {info.get(\"info\",\"\")[:60]}  ({info.get(\"requested_at\",\"\")})')
+        print(f'    Full ID: {did}')
+"
+        echo ""
+        echo "Paired devices:"
+        python3 -c "
+import json
+d = json.load(open('$devices_file'))
+paired = d.get('paired', {})
+if not paired:
+    print('  (none)')
+else:
+    for did, info in paired.items():
+        print(f'  {did[:8]}  {info.get(\"info\",\"\")[:60]}  ({info.get(\"paired_at\",\"\")})')
+"
+    else
+        # Approve via HTTP API (so server's in-memory state stays in sync)
+        local port=$(get_config "$name" "port")
+        # Find full device ID by prefix from pending list
+        local full_id=$(python3 -c "
+import json, sys
+d = json.load(open('$devices_file'))
+prefix = '$device_id'
+pending = d.get('pending', {})
+matches = [k for k in pending if k.startswith(prefix)]
+if not matches:
+    print('NONE', file=sys.stderr)
+    sys.exit(1)
+if len(matches) > 1:
+    print(f'Multiple matches: {[m[:8] for m in matches]}', file=sys.stderr)
+    sys.exit(1)
+print(matches[0])
+" 2>&1)
+        if echo "$full_id" | grep -q "^NONE\|^Multiple"; then
+            echo "$full_id"
+            exit 1
+        fi
+        local result=$(curl -s "http://127.0.0.1:${port}/api/approve/${full_id}")
+        if echo "$result" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('approved') else 1)" 2>/dev/null; then
+            echo "Approved device ${full_id:0:8}"
+        else
+            echo "Failed to approve: $result"
+            exit 1
+        fi
+    fi
+}
+
+case "${1:-}" in
+    start)   cmd_start "$2" ;;
+    stop)    cmd_stop "$2" ;;
+    restart) cmd_restart "$2" ;;
+    status)  cmd_status ;;
+    list)    cmd_list ;;
+    attach)  cmd_attach "$2" ;;
+    approve) cmd_approve "$2" "$3" ;;
+    create)  cmd_create "$2" ;;
+    *)       usage ;;
+esac
