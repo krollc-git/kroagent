@@ -192,8 +192,26 @@ When user says "reconvene panel X" or "reconvene {panel-name}":
     memory.md
     transcript-001.md
     transcript-002.md
+    shared/              ← shared files accessible to all panelists
+      (source code, data, reference docs, etc.)
+    <role-name>-history.md  ← per-panelist statement history
     ...
 ```
+
+### Shared Storage (`shared/`)
+
+The `shared/` directory holds files that ALL panelists can read during the discussion. Use this for:
+- **Source code snapshots** — copy relevant code so panelists can reference it without needing live access to the codebase
+- **Data exports** — bakeoff results, performance summaries, database schemas
+- **Reference documents** — specs, design docs, external research
+
+When spawning panelists, tell them: "Source code and shared reference materials are in `{panel_dir}/shared/`. Read any files you need to inform your analysis."
+
+**Important:** Shared storage is a snapshot/copy, not the live codebase. The moderator is responsible for syncing it before each session if the source has changed.
+
+### Per-Panelist History (`<role-name>-history.md`)
+
+Each panelist gets a history file containing every statement they made in previous sessions. When reconvening, include this in their prompt so they remember their prior positions and can build on them rather than repeating themselves.
 
 ## Example Session
 
