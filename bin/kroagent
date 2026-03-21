@@ -14,6 +14,8 @@ usage() {
     echo "  status          Show all agents and their state"
     echo "  list            List all configured agents"
     echo "  attach <name>   Attach to agent's tmux session"
+    echo "  kill <name>     Kill an agent (web server + tmux session)"
+    echo "  kill-all        Kill ALL agents"
     echo "  approve <name> [id] Approve a pending device (or list pending)"
     echo "  create <name>   Scaffold a new agent workspace"
     echo ""
@@ -360,14 +362,49 @@ print(matches[0])
     fi
 }
 
+cmd_kill() {
+    local name="$1"
+    [ -z "$name" ] && { echo "Usage: kroagent kill <name>"; exit 1; }
+    agent_exists "$name" || { echo "Agent '$name' not found"; exit 1; }
+
+    local type=$(get_config "$name" "type")
+
+    if [ "$type" = "claude-code" ]; then
+        local tmux_session=$(get_config "$name" "tmux_session")
+        # Kill web server
+        pkill -f "KROAGENT_TMUX_SESSION=$tmux_session.*kroagent_server" 2>/dev/null || true
+        # Kill tmux session
+        tmux kill-session -t "$tmux_session" 2>/dev/null || true
+        echo "Killed $name (web server + tmux session)"
+    elif [ "$type" = "local-llm" ]; then
+        local service=$(get_config "$name" "systemd_service")
+        if [ -n "$service" ]; then
+            systemctl --user stop "$service" 2>/dev/null || true
+        fi
+        echo "Killed $name"
+    fi
+}
+
+cmd_kill_all() {
+    echo "Killing all KroAgents..."
+    for dir in "$KROAGENTS_DIR"/*/; do
+        [ -f "$dir/agent.json" ] || continue
+        local name=$(basename "$dir")
+        cmd_kill "$name"
+    done
+    echo "All agents killed."
+}
+
 case "${1:-}" in
-    start)   cmd_start "$2" ;;
-    stop)    cmd_stop "$2" ;;
-    restart) cmd_restart "$2" ;;
-    status)  cmd_status ;;
-    list)    cmd_list ;;
-    attach)  cmd_attach "$2" ;;
-    approve) cmd_approve "$2" "$3" ;;
-    create)  cmd_create "$2" ;;
+    start)    cmd_start "$2" ;;
+    stop)     cmd_stop "$2" ;;
+    restart)  cmd_restart "$2" ;;
+    kill)     cmd_kill "$2" ;;
+    kill-all) cmd_kill_all ;;
+    status)   cmd_status ;;
+    list)     cmd_list ;;
+    attach)   cmd_attach "$2" ;;
+    approve)  cmd_approve "$2" "$3" ;;
+    create)   cmd_create "$2" ;;
     *)       usage ;;
 esac
