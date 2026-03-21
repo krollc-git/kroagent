@@ -20,10 +20,11 @@
 You build up project knowledge over time, like an employee would. To persist what you learn across sessions:
 
 - **NOTES.md** in your workspace is your notebook. Read it on every session start.
+- **Write NOTES.md early.** On your first session, create it as soon as you've oriented yourself. You can be restarted at any time without warning — if NOTES.md doesn't exist, everything you learned is lost.
+- **Update frequently.** Don't wait until the end of a session. After any significant discovery, fix, or decision, update NOTES.md immediately.
 - When you learn something non-obvious about the project — a gotcha, a workaround, a design decision, how something actually works vs how it looks — add it to NOTES.md.
 - Don't dump everything in there. Only save things that would save you (or a replacement) time in the future. If it's in the code or obvious from reading files, skip it.
 - Keep NOTES.md organized by topic, not chronologically. Update or remove entries that become stale.
-- Before a long session ends or when you've made significant progress, review and update NOTES.md.
 
 ## Skills
 
