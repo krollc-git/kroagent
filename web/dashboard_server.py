@@ -754,7 +754,8 @@ async function loadAgents() {
       checkDashboardPairing();
       return;
     }
-    const newAgents = data.agents || [];
+    const allAgents = data.agents || [];
+    const newAgents = allAgents.filter(a => a.tmux || a.web);
     const newNames = newAgents.map(a => a.name).join(',');
     const oldNames = agents.map(a => a.name).join(',');
     agents = newAgents;
