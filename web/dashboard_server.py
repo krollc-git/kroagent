@@ -203,9 +203,9 @@ def agent_status(name):
     return {"tmux": tmux_up, "web": web_up}
 
 
-def run_kroagent_cmd(action, name):
-    """Run a kroagent CLI command (start/stop/restart/kill). Returns (success, output)."""
-    if action not in ("start", "stop", "restart", "kill"):
+def run_kroagent_cmd(action, name, extra_args=None):
+    """Run a kroagent CLI command. Returns (success, output)."""
+    if action not in ("start", "stop", "restart", "kill", "switch"):
         return False, f"Invalid action: {action}"
     # Validate agent name: alphanumeric, hyphens, underscores only
     if not re.match(r'^[a-zA-Z0-9_-]+$', name):
@@ -213,9 +213,12 @@ def run_kroagent_cmd(action, name):
     config_file = KROAGENTS_DIR / name / "agent.json"
     if not config_file.is_file():
         return False, f"Agent '{name}' not found"
+    cmd = [KROAGENT_CLI, action, name]
+    if extra_args:
+        cmd.extend(extra_args)
     try:
         result = subprocess.run(
-            [KROAGENT_CLI, action, name],
+            cmd,
             capture_output=True, text=True, timeout=30,
             env={**os.environ, "HOME": str(Path.home())}
         )
@@ -499,6 +502,13 @@ body {
 .pane-header .status-dot.offline { background: #f87171; }
 .pane-header .status-dot.checking { background: #fbbf24; }
 .pane-header .max-btn-top { margin-left: auto; }
+.pane-header .backend-select {
+  background: #21262d; color: #8b949e; border: 1px solid #30363d;
+  padding: 1px 4px; border-radius: 4px; font-size: 10px; font-family: inherit;
+  cursor: pointer; outline: none;
+}
+.pane-header .backend-select:hover { border-color: #58a6ff; }
+.pane-header .backend-label { font-size: 10px; color: #8b949e; }
 .pane-header button {
   background: #21262d; color: #8b949e; border: 1px solid #30363d;
   padding: 2px 6px; border-radius: 4px; cursor: pointer; font-size: 10px;
@@ -836,6 +846,11 @@ function renderGrid() {
         <div class="pane-header-row1">
           <div class="status-dot checking" id="dot-${name}"></div>
           <span class="agent-name" ondblclick="toggleFullscreen('${name}')" title="Double-click to maximize">${escapeHtml(name)}</span>
+          ${agent.backends && agent.backends.length > 1 ?
+            `<select class="backend-select" id="backend-${name}" onchange="switchBackend('${name}', this.value)">
+              ${agent.backends.map(b => `<option value="${b}" ${b === agent.current_backend ? 'selected' : ''}>${b}</option>`).join('')}
+            </select>` :
+            (agent.current_backend ? `<span class="backend-label">${escapeHtml(agent.current_backend)}</span>` : '')}
           <button onclick="toggleFullscreen('${name}')" id="max-btn-${name}" class="max-btn max-btn-top" title="Maximize/minimize">&#x26F6;</button>
         </div>
         <div class="pane-header-row2">
@@ -1207,6 +1222,39 @@ async function manageAgent(name, action) {
     await loadAgents();
     if (action !== 'stop' && action !== 'kill') refreshPane(name);
   }, delay);
+}
+
+async function switchBackend(name, backend) {
+  if (!confirm(`Switch ${name} to ${backend}? This will kill the current session and start a new one.`)) {
+    // Reset the select to the current value
+    await loadAgents();
+    return;
+  }
+
+  const select = document.getElementById('backend-' + name);
+  if (select) select.disabled = true;
+
+  try {
+    const resp = await fetch(`/api/agents/${name}/switch`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({backend: backend, device_id: deviceId})
+    });
+    const data = await resp.json();
+    if (!data.success) {
+      console.error(`Switch ${name} failed:`, data.output);
+      alert(`Switch failed: ${data.output}`);
+    }
+  } catch(e) {
+    console.error(`Switch ${name} error:`, e);
+  }
+
+  // Reload after session restarts
+  setTimeout(async () => {
+    if (select) select.disabled = false;
+    await loadAgents();
+    wakePane(name);
+  }, 5000);
 }
 
 function confirmStopAgent(name) {
@@ -1590,6 +1638,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "description": a.get("description", ""),
                     "tmux": status["tmux"],
                     "web": status["web"],
+                    "current_backend": a.get("current_backend", ""),
+                    "backends": list(a.get("backends", {}).keys()),
                 })
             self._json(200, {"agents": result})
 
@@ -1733,6 +1783,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             steps = create_agent(name, description, int(port), workdir)
             all_ok = all(s["ok"] for s in steps)
             self._json(200, {"success": all_ok, "steps": steps, "agent": name, "port": port})
+
+        elif parsed.path.startswith("/api/agents/") and "/switch" in parsed.path:
+            device_id = body.get("device_id", "")
+            if not _is_paired(device_id):
+                self._json(403, {"error": "not paired"})
+                return
+            name = parsed.path.split("/api/agents/")[1].split("/switch")[0]
+            backend = body.get("backend", "")
+            if not backend:
+                self._json(400, {"error": "No backend specified"})
+                return
+            if not re.match(r'^[a-zA-Z0-9_-]+$', backend):
+                self._json(400, {"error": "Invalid backend name"})
+                return
+            ok, output = run_kroagent_cmd("switch", name, [backend])
+            self._json(200, {"success": ok, "output": output})
 
         elif parsed.path.startswith("/api/agents/") and "/manage" in parsed.path:
             device_id = body.get("device_id", "")

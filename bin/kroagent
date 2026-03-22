@@ -18,6 +18,7 @@ usage() {
     echo "  kill-all        Kill ALL agents"
     echo "  approve <name> [id] Approve a pending device (or list pending)"
     echo "  create <name>   Scaffold a new agent workspace"
+    echo "  switch <name> <backend>  Switch agent to a different backend"
     echo "  dashboard       Start the multi-pane dashboard"
     echo "  dashboard-stop  Stop the dashboard"
     echo ""
@@ -29,8 +30,35 @@ get_config() {
     python3 -c "import json; d=json.load(open('$KROAGENTS_DIR/$name/agent.json')); print(d.get('$key',''))"
 }
 
+get_launch_command() {
+    # Get the launch command for the current backend.
+    # Supports both new (backends/current_backend) and legacy (hardcoded claude) configs.
+    local name="$1"
+    python3 -c "
+import json
+d = json.load(open('$KROAGENTS_DIR/$name/agent.json'))
+backends = d.get('backends', {})
+current = d.get('current_backend', '')
+if backends and current and current in backends:
+    print(backends[current])
+elif d.get('type') == 'claude-code':
+    print('claude --dangerously-skip-permissions')
+else:
+    print('')
+"
+}
+
 agent_exists() {
     [ -f "$KROAGENTS_DIR/$1/agent.json" ]
+}
+
+resolve_binary() {
+    # Resolve a command name to a full path, checking ~/.npm-global/bin as fallback
+    local cmd="$1"
+    local bin
+    bin=$(command -v "$cmd" 2>/dev/null || echo "")
+    [ -z "$bin" ] && [ -x "$HOME/.npm-global/bin/$cmd" ] && bin="$HOME/.npm-global/bin/$cmd"
+    echo "$bin"
 }
 
 start_claude_agent() {
@@ -39,17 +67,25 @@ start_claude_agent() {
     local workdir=$(get_config "$name" "workdir")
     local port=$(get_config "$name" "port")
 
-    # Find claude binary
-    local claude_bin
-    claude_bin=$(command -v claude 2>/dev/null || echo "")
-    [ -z "$claude_bin" ] && [ -x "$HOME/.npm-global/bin/claude" ] && claude_bin="$HOME/.npm-global/bin/claude"
-    [ -z "$claude_bin" ] && { echo "ERROR: claude not found in PATH or ~/.npm-global/bin/"; exit 1; }
+    # Get launch command from config (supports multiple backends)
+    local launch_cmd
+    launch_cmd=$(get_launch_command "$name")
+    [ -z "$launch_cmd" ] && { echo "ERROR: No launch command configured for $name"; exit 1; }
 
-    # Start tmux session with Claude Code if not running
+    # Resolve the binary (first word of the command)
+    local cmd_binary="${launch_cmd%% *}"
+    local cmd_args="${launch_cmd#* }"
+    [ "$cmd_args" = "$launch_cmd" ] && cmd_args=""
+    local resolved_bin
+    resolved_bin=$(resolve_binary "$cmd_binary")
+    [ -z "$resolved_bin" ] && { echo "ERROR: $cmd_binary not found in PATH or ~/.npm-global/bin/"; exit 1; }
+    local full_cmd="$resolved_bin${cmd_args:+ $cmd_args}"
+
+    # Start tmux session if not running
     if ! tmux has-session -t "$tmux_session" 2>/dev/null; then
-        echo "Starting Claude Code session: $tmux_session"
-        tmux new-session -d -s "$tmux_session" -c "$workdir" \
-            "$claude_bin --dangerously-skip-permissions"
+        local current_backend=$(get_config "$name" "current_backend")
+        echo "Starting ${current_backend:-claude-code} session: $tmux_session"
+        tmux new-session -d -s "$tmux_session" -c "$workdir" "$full_cmd"
         sleep 3
     else
         echo "Tmux session $tmux_session already running"
@@ -443,6 +479,51 @@ cmd_dashboard_stop() {
     echo "Dashboard stopped"
 }
 
+cmd_switch() {
+    local name="$1"
+    local backend="$2"
+    [ -z "$name" ] || [ -z "$backend" ] && { echo "Usage: kroagent switch <name> <backend>"; exit 1; }
+    agent_exists "$name" || { echo "Agent '$name' not found"; exit 1; }
+
+    # Verify backend exists in config
+    local valid
+    valid=$(python3 -c "
+import json, sys
+d = json.load(open('$KROAGENTS_DIR/$name/agent.json'))
+backends = d.get('backends', {})
+if '$backend' in backends:
+    print('yes')
+else:
+    print('Available backends: ' + ', '.join(backends.keys()) if backends else 'No backends configured')
+")
+    if [ "$valid" != "yes" ]; then
+        echo "$valid"
+        exit 1
+    fi
+
+    # Update current_backend in agent.json
+    python3 -c "
+import json
+f = '$KROAGENTS_DIR/$name/agent.json'
+d = json.load(open(f))
+d['current_backend'] = '$backend'
+open(f, 'w').write(json.dumps(d, indent=2) + '\n')
+"
+    echo "Switched $name to backend: $backend"
+
+    # Kill existing tmux session and restart
+    local tmux_session=$(get_config "$name" "tmux_session")
+    local port=$(get_config "$name" "port")
+    if tmux has-session -t "$tmux_session" 2>/dev/null; then
+        echo "Killing existing session..."
+        tmux kill-session -t "$tmux_session" 2>/dev/null || true
+        sleep 2
+    fi
+
+    # Restart
+    cmd_start "$name"
+}
+
 case "${1:-}" in
     start)          cmd_start "$2" ;;
     stop)           cmd_stop "$2" ;;
@@ -454,6 +535,7 @@ case "${1:-}" in
     attach)         cmd_attach "$2" ;;
     approve)        cmd_approve "$2" "$3" ;;
     create)         cmd_create "$2" ;;
+    switch)         cmd_switch "$2" "$3" ;;
     dashboard)      cmd_dashboard ;;
     dashboard-stop) cmd_dashboard_stop ;;
     *)             usage ;;
