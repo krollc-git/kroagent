@@ -9,11 +9,13 @@ Each Claude Code KroAgent runs in a tmux session. This server:
 - Both web and tmux terminal see the same session
 """
 
+import base64
 import json
 import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -23,6 +25,7 @@ TMUX_SESSION = os.environ.get("KROAGENT_TMUX_SESSION", "kroagent-kroroku-dev")
 AGENT_NAME = os.environ.get("KROAGENT_NAME", "kroroku-dev")
 BUFFER_LINES = 2000
 DATA_DIR = Path(os.environ.get("KROAGENT_DATA_DIR", str(Path.home() / ".config" / "kroagents")))
+UPLOADS_DIR = Path(os.environ.get("KROAGENT_UPLOADS_DIR", str(Path.home() / "kroagents" / AGENT_NAME / "uploads")))
 
 # --- Device pairing ---
 _devices = {"paired": {}, "pending": {}}
@@ -174,6 +177,23 @@ body {
 }
 #input-bar button:hover { background: #2ea043; }
 #input-bar button:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+body.dragging #terminal {
+  border: 2px dashed #58a6ff;
+  background: #0d1117ee;
+}
+body.dragging #terminal::after {
+  content: 'Drop image here';
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  color: #58a6ff; font-size: 18px; font-weight: bold;
+  pointer-events: none;
+}
+#terminal { position: relative; }
+.upload-notice {
+  background: #1b4332; color: #4ade80; padding: 6px 12px;
+  border-radius: 6px; font-size: 12px; margin: 4px 16px;
+  flex-shrink: 0;
+}
 #pairing {
   display: none; text-align: center; padding: 60px 20px;
   flex: 1; flex-direction: column; justify-content: center;
@@ -394,6 +414,86 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
 });
 
+// --- Image paste and drag-and-drop ---
+async function uploadImage(blob, source) {
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const base64 = reader.result.split(',')[1];
+    const ext = blob.type.split('/')[1] || 'png';
+    try {
+      const resp = await fetch('/upload', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({image: base64, ext: ext, device_id: deviceId, source: source})
+      });
+      const data = await resp.json();
+      if (data.path) {
+        const notice = document.createElement('div');
+        notice.className = 'upload-notice';
+        notice.textContent = 'Image uploaded: ' + data.path;
+        document.body.insertBefore(notice, document.getElementById('input-bar'));
+        setTimeout(() => notice.remove(), 5000);
+        setTimeout(refreshBuffer, 1000);
+        setTimeout(refreshBuffer, 3000);
+      }
+    } catch(e) {
+      console.error('Upload error:', e);
+    }
+  };
+  reader.readAsDataURL(blob);
+}
+
+// Ctrl+V paste
+document.addEventListener('paste', e => {
+  if (!paired) return;
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      e.preventDefault();
+      uploadImage(item.getAsFile(), 'paste');
+      return;
+    }
+  }
+});
+
+// Drag and drop
+const termEl = document.getElementById('terminal');
+let dragCounter = 0;
+
+document.addEventListener('dragenter', e => {
+  e.preventDefault();
+  dragCounter++;
+  document.body.classList.add('dragging');
+});
+
+document.addEventListener('dragleave', e => {
+  dragCounter--;
+  if (dragCounter <= 0) {
+    dragCounter = 0;
+    document.body.classList.remove('dragging');
+  }
+});
+
+document.addEventListener('dragover', e => {
+  e.preventDefault();
+});
+
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  dragCounter = 0;
+  document.body.classList.remove('dragging');
+  if (!paired) return;
+  const files = e.dataTransfer?.files;
+  if (!files) return;
+  for (const file of files) {
+    if (file.type.startsWith('image/')) {
+      uploadImage(file, 'drop');
+      return;
+    }
+  }
+});
+
 // Initial load
 checkAuth();
 </script>
@@ -488,6 +588,32 @@ class Handler(BaseHTTPRequestHandler):
                 return
             ok = send_to_pane(text)
             self._json(200, {"sent": ok})
+
+        elif parsed.path == "/upload":
+            device_id = body.get("device_id", "")
+            if not _is_paired(device_id):
+                self._json(403, {"error": "not paired"})
+                return
+            if not get_session_status():
+                self._json(503, {"error": "session not running"})
+                return
+            image_b64 = body.get("image", "")
+            ext = body.get("ext", "png")
+            if ext not in ("png", "jpg", "jpeg", "gif", "webp"):
+                ext = "png"
+            if not image_b64:
+                self._json(400, {"error": "no image data"})
+                return
+            # Save to uploads dir
+            UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            filename = f"image-{ts}.{ext}"
+            filepath = UPLOADS_DIR / filename
+            filepath.write_bytes(base64.b64decode(image_b64))
+            # Tell the agent about it
+            msg = f"[Image uploaded to {filepath}] Please look at this image."
+            send_to_pane(msg)
+            self._json(200, {"path": str(filepath), "filename": filename})
 
         elif parsed.path == "/key":
             device_id = body.get("device_id", "")
