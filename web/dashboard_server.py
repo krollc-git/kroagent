@@ -288,6 +288,16 @@ body {
 .grid-5 { grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr 1fr; }
 .grid-6 { grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr 1fr; }
 
+/* Fullscreen pane */
+#grid.has-fullscreen { grid-template-columns: 1fr !important; grid-template-rows: 1fr !important; }
+#grid.has-fullscreen .pane:not(.fullscreen) { display: none; }
+#grid.has-fullscreen .pane.fullscreen { border-radius: 0; border: none; }
+.pane.fullscreen .pane-terminal { font-size: 13px; line-height: 1.5; padding: 12px 16px; }
+.pane.fullscreen .pane-input textarea { font-size: 14px; min-height: 40px; max-height: 200px; padding: 8px 12px; }
+.pane.fullscreen .pane-header { padding: 8px 12px; }
+.pane.fullscreen .pane-header .agent-name { font-size: 14px; }
+.pane-header .max-btn { font-size: 12px; }
+
 /* Individual chat pane */
 .pane {
   background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
@@ -513,7 +523,7 @@ function renderGrid() {
     pane.innerHTML = `
       <div class="pane-header">
         <div class="status-dot checking" id="dot-${name}"></div>
-        <span class="agent-name">${escapeHtml(name)}</span>
+        <span class="agent-name" ondblclick="toggleFullscreen('${name}')" title="Double-click to maximize">${escapeHtml(name)}</span>
         <div class="pane-controls">
           <button onclick="manageAgent('${name}','start')" id="start-btn-${name}" class="mgmt-btn start-btn" title="Start agent">Start</button>
           <button onclick="manageAgent('${name}','stop')" id="stop-btn-${name}" class="mgmt-btn stop-btn" title="Stop agent">Stop</button>
@@ -525,6 +535,7 @@ function renderGrid() {
           <button onclick="sendAgentKey('${name}','Space')" title="Space">⎵</button>
           <button onclick="refreshPane('${name}')" title="Refresh">↻</button>
           <button onclick="togglePaneAutoRefresh('${name}')" id="auto-btn-${name}" title="Toggle auto-refresh">Auto: ON</button>
+          <button onclick="toggleFullscreen('${name}')" id="max-btn-${name}" class="max-btn" title="Maximize/minimize">&#x26F6;</button>
         </div>
       </div>
       <div class="pane-terminal" id="term-${name}"></div>
@@ -769,6 +780,46 @@ function autoResize(el) {
   el.style.height = 'auto';
   el.style.height = Math.min(el.scrollHeight, 120) + 'px';
 }
+
+// --- Fullscreen ---
+let fullscreenAgent = null;
+
+function toggleFullscreen(name) {
+  const grid = document.getElementById('grid');
+  const pane = document.getElementById('pane-' + name);
+  if (!pane) return;
+
+  if (fullscreenAgent === name) {
+    // Exit fullscreen
+    pane.classList.remove('fullscreen');
+    grid.classList.remove('has-fullscreen');
+    fullscreenAgent = null;
+  } else {
+    // Exit previous fullscreen if any
+    if (fullscreenAgent) {
+      const prev = document.getElementById('pane-' + fullscreenAgent);
+      if (prev) prev.classList.remove('fullscreen');
+    }
+    // Enter fullscreen
+    pane.classList.add('fullscreen');
+    grid.classList.add('has-fullscreen');
+    fullscreenAgent = name;
+    // Focus the input
+    const input = document.getElementById('input-' + name);
+    if (input) input.focus();
+    // Scroll to bottom
+    const term = document.getElementById('term-' + name);
+    if (term && !paneStates[name]?.userScrolled) {
+      term.scrollTop = term.scrollHeight;
+    }
+  }
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && fullscreenAgent) {
+    toggleFullscreen(fullscreenAgent);
+  }
+});
 
 // --- Agent management ---
 async function manageAgent(name, action) {
