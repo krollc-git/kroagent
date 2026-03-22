@@ -473,7 +473,6 @@ body {
 .pane.fullscreen .pane-input textarea { font-size: 14px; min-height: 40px; max-height: 200px; padding: 8px 12px; }
 .pane.fullscreen .pane-header { padding: 8px 12px; }
 .pane.fullscreen .pane-header .agent-name { font-size: 14px; }
-.pane-header .max-btn { font-size: 12px; }
 
 /* Individual chat pane */
 .pane {
@@ -484,8 +483,13 @@ body {
 .pane.focused { border-color: #58a6ff; }
 .pane-header {
   background: #161b22; padding: 6px 10px;
-  display: flex; align-items: center; gap: 8px;
   border-bottom: 1px solid #30363d; flex-shrink: 0;
+}
+.pane-header-row1 {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+}
+.pane-header-row2 {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
 }
 .pane-header .agent-name { font-size: 12px; color: #58a6ff; font-weight: 600; }
 .pane-header .status-dot {
@@ -494,7 +498,7 @@ body {
 .pane-header .status-dot.online { background: #4ade80; }
 .pane-header .status-dot.offline { background: #f87171; }
 .pane-header .status-dot.checking { background: #fbbf24; }
-.pane-header .pane-controls { margin-left: auto; display: flex; gap: 4px; }
+.pane-header .max-btn-top { margin-left: auto; }
 .pane-header button {
   background: #21262d; color: #8b949e; border: 1px solid #30363d;
   padding: 2px 6px; border-radius: 4px; cursor: pointer; font-size: 10px;
@@ -507,6 +511,9 @@ body {
 .pane-header .restart-btn { color: #fbbf24; }
 .pane-header .mgmt-btn:disabled { color: #484f58; cursor: not-allowed; }
 .pane-header .mgmt-btn.running { color: #484f58; cursor: wait; }
+.pane-header .auto-btn.active { color: #4ade80; border-color: #1b4332; }
+.pane-header .auto-btn.idle { color: #fbbf24; border-color: #3b2e1c; }
+.pane-header .auto-btn.off { color: #8b949e; }
 .pane-terminal {
   flex: 1; overflow-y: auto; padding: 6px 8px;
   font-size: 11px; line-height: 1.4;
@@ -826,9 +833,12 @@ function renderGrid() {
     pane.id = 'pane-' + name;
     pane.innerHTML = `
       <div class="pane-header">
-        <div class="status-dot checking" id="dot-${name}"></div>
-        <span class="agent-name" ondblclick="toggleFullscreen('${name}')" title="Double-click to maximize">${escapeHtml(name)}</span>
-        <div class="pane-controls">
+        <div class="pane-header-row1">
+          <div class="status-dot checking" id="dot-${name}"></div>
+          <span class="agent-name" ondblclick="toggleFullscreen('${name}')" title="Double-click to maximize">${escapeHtml(name)}</span>
+          <button onclick="toggleFullscreen('${name}')" id="max-btn-${name}" class="max-btn max-btn-top" title="Maximize/minimize">&#x26F6;</button>
+        </div>
+        <div class="pane-header-row2">
           <button onclick="confirmClose('${name}')" id="close-btn-${name}" class="mgmt-btn close-btn" title="Close pane (session preserved)">Close</button>
           <button onclick="confirmStopAgent('${name}')" id="stop-btn-${name}" class="mgmt-btn stop-btn" title="Stop agent (kills session)">Stop</button>
           <button onclick="manageAgent('${name}','restart')" id="restart-btn-${name}" class="mgmt-btn restart-btn" title="Restart agent">Restart</button>
@@ -837,9 +847,9 @@ function renderGrid() {
           <button onclick="sendAgentKey('${name}','C-c')" title="Ctrl+C">^C</button>
           <button onclick="sendAgentKey('${name}','Enter')" title="Enter">↵</button>
           <button onclick="sendAgentKey('${name}','Space')" title="Space">⎵</button>
+          <span class="sep">|</span>
           <button onclick="refreshPane('${name}')" title="Refresh">↻</button>
-          <button onclick="togglePaneAutoRefresh('${name}')" id="auto-btn-${name}" title="Toggle auto-refresh">Auto: ON</button>
-          <button onclick="toggleFullscreen('${name}')" id="max-btn-${name}" class="max-btn" title="Maximize/minimize">&#x26F6;</button>
+          <button onclick="togglePaneAutoRefresh('${name}')" id="auto-btn-${name}" class="auto-btn active" title="Toggle auto-refresh">Auto: ON</button>
         </div>
       </div>
       <div class="pane-terminal" id="term-${name}"></div>
@@ -898,18 +908,22 @@ const IDLE_TIMEOUT = 60000; // Stop refreshing after 60s of no buffer changes
 const ACTIVE_INTERVAL = 2000; // Refresh every 2s when active
 const SLOW_INTERVAL = 10000; // Refresh every 10s when slowing down
 
+function setAutoBtn(name, text, cls) {
+  const btn = document.getElementById('auto-btn-' + name);
+  if (!btn) return;
+  btn.textContent = text;
+  btn.className = 'auto-btn ' + cls;
+}
+
 function wakePane(name) {
   const state = paneStates[name];
   if (!state) return;
   state.lastActivity = Date.now();
-  // Restart fast polling if it was stopped or slow
   startPaneTimer(name);
-  // Update button
-  const btn = document.getElementById('auto-btn-' + name);
-  if (btn && !state.autoRefresh) {
+  if (!state.autoRefresh) {
     state.autoRefresh = true;
-    btn.textContent = 'Auto: ON';
   }
+  setAutoBtn(name, 'Auto: ON', 'active');
 }
 
 function startPaneTimer(name) {
@@ -920,12 +934,10 @@ function startPaneTimer(name) {
     const now = Date.now();
     const sinceChange = now - (state.lastChange || 0);
     const sinceActivity = now - (state.lastActivity || 0);
-    // Stop if idle for over IDLE_TIMEOUT and no user activity
     if (sinceChange > IDLE_TIMEOUT && sinceActivity > IDLE_TIMEOUT) {
       clearInterval(state.refreshTimer);
       state.refreshTimer = null;
-      const btn = document.getElementById('auto-btn-' + name);
-      if (btn) btn.textContent = 'Auto: idle';
+      setAutoBtn(name, 'Auto: idle', 'idle');
       return;
     }
     refreshPane(name);
@@ -935,15 +947,14 @@ function startPaneTimer(name) {
 function togglePaneAutoRefresh(name) {
   const state = paneStates[name];
   state.autoRefresh = !state.autoRefresh;
-  const btn = document.getElementById('auto-btn-' + name);
   if (state.autoRefresh) {
     state.lastActivity = Date.now();
     startPaneTimer(name);
-    if (btn) btn.textContent = 'Auto: ON';
+    setAutoBtn(name, 'Auto: ON', 'active');
   } else {
     clearInterval(state.refreshTimer);
     state.refreshTimer = null;
-    if (btn) btn.textContent = 'Auto: OFF';
+    setAutoBtn(name, 'Auto: OFF', 'off');
   }
 }
 
