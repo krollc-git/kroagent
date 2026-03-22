@@ -455,22 +455,21 @@ function stageImage(blob) {
     pendingImage = {blob: blob, dataUrl: reader.result};
     // Show preview in input bar
     let preview = document.getElementById('img-preview');
-    if (!preview) {
-      preview = document.createElement('div');
-      preview.id = 'img-preview';
-      preview.className = 'img-preview';
-      const inputBar = document.getElementById('input-bar');
-      inputBar.insertBefore(preview, inputEl);
-    }
-    preview.innerHTML = '';
+    if (preview) preview.remove();
+    preview = document.createElement('div');
+    preview.id = 'img-preview';
+    preview.className = 'img-preview';
     const img = document.createElement('img');
     img.src = reader.result;
     const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
     removeBtn.className = 'remove';
     removeBtn.textContent = 'x';
-    removeBtn.onclick = () => { pendingImage = null; preview.remove(); };
+    removeBtn.onclick = (e) => { e.stopPropagation(); pendingImage = null; preview.remove(); };
     preview.appendChild(img);
     preview.appendChild(removeBtn);
+    const inputBar = document.getElementById('input-bar');
+    inputBar.insertBefore(preview, inputBar.firstChild);
     inputEl.focus();
   };
   reader.readAsDataURL(blob);
