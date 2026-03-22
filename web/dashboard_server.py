@@ -818,7 +818,7 @@ function renderGrid() {
     const name = agent.name;
 
     if (!paneStates[name]) {
-      paneStates[name] = {lastBuffer: '', userScrolled: false, pendingImage: null, autoRefresh: true, refreshTimer: null};
+      paneStates[name] = {lastBuffer: '', userScrolled: false, pendingImage: null, autoRefresh: true, refreshTimer: null, lastActivity: Date.now(), lastChange: Date.now()};
     }
 
     const pane = document.createElement('div');
@@ -894,24 +894,56 @@ function renderGrid() {
 
 const MAX_PANES = 6;
 
+const IDLE_TIMEOUT = 60000; // Stop refreshing after 60s of no buffer changes
+const ACTIVE_INTERVAL = 2000; // Refresh every 2s when active
+const SLOW_INTERVAL = 10000; // Refresh every 10s when slowing down
+
+function wakePane(name) {
+  const state = paneStates[name];
+  if (!state) return;
+  state.lastActivity = Date.now();
+  // Restart fast polling if it was stopped or slow
+  startPaneTimer(name);
+  // Update button
+  const btn = document.getElementById('auto-btn-' + name);
+  if (btn && !state.autoRefresh) {
+    state.autoRefresh = true;
+    btn.textContent = 'Auto: ON';
+  }
+}
+
 function startPaneTimer(name) {
   const state = paneStates[name];
   if (state.refreshTimer) clearInterval(state.refreshTimer);
-  if (state.autoRefresh) {
-    state.refreshTimer = setInterval(() => refreshPane(name), 2000);
-  }
+  if (!state.autoRefresh) return;
+  state.refreshTimer = setInterval(() => {
+    const now = Date.now();
+    const sinceChange = now - (state.lastChange || 0);
+    const sinceActivity = now - (state.lastActivity || 0);
+    // Stop if idle for over IDLE_TIMEOUT and no user activity
+    if (sinceChange > IDLE_TIMEOUT && sinceActivity > IDLE_TIMEOUT) {
+      clearInterval(state.refreshTimer);
+      state.refreshTimer = null;
+      const btn = document.getElementById('auto-btn-' + name);
+      if (btn) btn.textContent = 'Auto: idle';
+      return;
+    }
+    refreshPane(name);
+  }, (Date.now() - (state.lastChange || 0) > 30000) ? SLOW_INTERVAL : ACTIVE_INTERVAL);
 }
 
 function togglePaneAutoRefresh(name) {
   const state = paneStates[name];
   state.autoRefresh = !state.autoRefresh;
   const btn = document.getElementById('auto-btn-' + name);
-  if (btn) btn.textContent = 'Auto: ' + (state.autoRefresh ? 'ON' : 'OFF');
   if (state.autoRefresh) {
+    state.lastActivity = Date.now();
     startPaneTimer(name);
+    if (btn) btn.textContent = 'Auto: ON';
   } else {
     clearInterval(state.refreshTimer);
     state.refreshTimer = null;
+    if (btn) btn.textContent = 'Auto: OFF';
   }
 }
 
@@ -944,6 +976,7 @@ async function refreshPane(name) {
 
     if (data.buffer !== paneStates[name].lastBuffer) {
       paneStates[name].lastBuffer = data.buffer;
+      paneStates[name].lastChange = Date.now();
       term.innerHTML = escapeHtml(data.buffer);
       if (!paneStates[name].userScrolled) {
         term.scrollTop = term.scrollHeight;
@@ -967,6 +1000,7 @@ async function refreshAll() {
 
 // --- Send message to agent ---
 async function sendPaneMessage(name) {
+  wakePane(name);
   const input = document.getElementById('input-' + name);
   const sendBtn = document.getElementById('send-btn-' + name);
   const msg = input.value;
@@ -1008,6 +1042,7 @@ async function sendPaneMessage(name) {
 }
 
 async function sendAgentKey(name, key) {
+  wakePane(name);
   try {
     await fetch(`/api/agents/${name}/key`, {
       method: 'POST',
