@@ -227,6 +227,183 @@ def run_kroagent_cmd(action, name):
         return False, str(e)
 
 
+DOMAIN = "morrison.internal"
+KROCLAW_IP = "192.168.1.103"
+NGINX_CONFIG = "/etc/nginx/sites-enabled/kroclaw"
+DNS_ZONE_FILE = "/etc/bind/zones/db.morrison.internal"
+
+
+def next_available_port():
+    """Find the next available port by scanning agent configs."""
+    used_ports = set()
+    for d in KROAGENTS_DIR.iterdir():
+        config_file = d / "agent.json"
+        if config_file.is_file():
+            try:
+                config = json.loads(config_file.read_text())
+                p = config.get("port", 0)
+                if p:
+                    used_ports.add(p)
+            except (json.JSONDecodeError, OSError):
+                pass
+    # Start at 18880, increment by 10
+    port = 18880
+    while port in used_ports:
+        port += 10
+    return port
+
+
+def create_agent(name, description, port, workdir):
+    """Create a new agent end-to-end. Returns list of step results."""
+    steps = []
+
+    # Validate name
+    if not re.match(r'^[a-zA-Z][a-zA-Z0-9_-]*$', name):
+        return [{"step": "validate", "ok": False, "msg": "Name must start with a letter and contain only letters, numbers, hyphens, underscores"}]
+    if (KROAGENTS_DIR / name / "agent.json").exists():
+        return [{"step": "validate", "ok": False, "msg": f"Agent '{name}' already exists"}]
+
+    # Step 1: Create workspace via CLI
+    try:
+        env = {**os.environ, "HOME": str(Path.home()), "KROAGENT_DOMAIN": DOMAIN}
+        result = subprocess.run(
+            [KROAGENT_CLI, "create", name],
+            capture_output=True, text=True, timeout=15, env=env
+        )
+        ok = result.returncode == 0
+        steps.append({"step": "create", "ok": ok, "msg": (result.stdout + result.stderr).strip()})
+        if not ok:
+            return steps
+    except Exception as e:
+        steps.append({"step": "create", "ok": False, "msg": str(e)})
+        return steps
+
+    # Step 2: Update agent.json with port, description, workdir
+    try:
+        config_file = KROAGENTS_DIR / name / "agent.json"
+        config = json.loads(config_file.read_text())
+        config["port"] = port
+        config["description"] = description
+        config["workdir"] = workdir
+        config["domain"] = f"{name}.{DOMAIN}"
+        config_file.write_text(json.dumps(config, indent=2) + "\n")
+        steps.append({"step": "config", "ok": True, "msg": f"Set port={port}, workdir={workdir}"})
+    except Exception as e:
+        steps.append({"step": "config", "ok": False, "msg": str(e)})
+        return steps
+
+    # Step 3: Add DNS record on dhcprouter
+    try:
+        # Check if record already exists
+        check = subprocess.run(
+            ["ssh", "dhcprouter", f"grep -q '^{name}' {DNS_ZONE_FILE}"],
+            capture_output=True, timeout=10
+        )
+        if check.returncode == 0:
+            steps.append({"step": "dns", "ok": True, "msg": "DNS record already exists"})
+        else:
+            # Get current serial, increment it
+            get_serial = subprocess.run(
+                ["ssh", "dhcprouter", f"grep -oP '\\d{{10}}(?=\\s+; Serial)' {DNS_ZONE_FILE}"],
+                capture_output=True, text=True, timeout=10
+            )
+            old_serial = get_serial.stdout.strip()
+            today = time.strftime("%Y%m%d")
+            if old_serial.startswith(today):
+                seq = int(old_serial[-2:]) + 1
+                new_serial = f"{today}{seq:02d}"
+            else:
+                new_serial = f"{today}01"
+
+            # Add A record and update serial
+            dns_entry = f"{name}     IN      A       {KROCLAW_IP}"
+            cmd = (
+                f"sudo sed -i 's/{old_serial}/{new_serial}/' {DNS_ZONE_FILE} && "
+                f"echo '{dns_entry}' | sudo tee -a {DNS_ZONE_FILE} > /dev/null && "
+                f"sudo systemctl reload bind9"
+            )
+            result = subprocess.run(
+                ["ssh", "dhcprouter", cmd],
+                capture_output=True, text=True, timeout=15
+            )
+            ok = result.returncode == 0
+            msg = "DNS record added" if ok else (result.stdout + result.stderr).strip()
+            steps.append({"step": "dns", "ok": ok, "msg": msg})
+            if not ok:
+                return steps
+    except Exception as e:
+        steps.append({"step": "dns", "ok": False, "msg": str(e)})
+        return steps
+
+    # Step 4: Add nginx server block
+    try:
+        # Check if server block already exists
+        check = subprocess.run(
+            ["grep", "-q", f"server_name {name}.{DOMAIN}", NGINX_CONFIG],
+            capture_output=True, timeout=5
+        )
+        if check.returncode == 0:
+            steps.append({"step": "nginx", "ok": True, "msg": "Nginx block already exists"})
+        else:
+            nginx_block = f"""
+server {{
+    listen 443 ssl;
+    server_name {name}.{DOMAIN};
+    ssl_certificate /etc/openclaw/certs/kroclaw.pem;
+    ssl_certificate_key /etc/openclaw/certs/kroclaw-key.pem;
+    location / {{
+        proxy_pass http://127.0.0.1:{port};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 300s;
+    }}
+}}
+"""
+            # Append to nginx config
+            result = subprocess.run(
+                ["sudo", "tee", "-a", NGINX_CONFIG],
+                input=nginx_block, capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                steps.append({"step": "nginx", "ok": False, "msg": "Failed to write nginx config"})
+                return steps
+
+            # Test config
+            test = subprocess.run(
+                ["sudo", "nginx", "-t"],
+                capture_output=True, text=True, timeout=10
+            )
+            if test.returncode != 0:
+                steps.append({"step": "nginx", "ok": False, "msg": f"Nginx test failed: {test.stderr}"})
+                return steps
+
+            # Reload
+            reload_result = subprocess.run(
+                ["sudo", "systemctl", "reload", "nginx"],
+                capture_output=True, text=True, timeout=10
+            )
+            ok = reload_result.returncode == 0
+            msg = "Nginx configured and reloaded" if ok else reload_result.stderr.strip()
+            steps.append({"step": "nginx", "ok": ok, "msg": msg})
+            if not ok:
+                return steps
+    except Exception as e:
+        steps.append({"step": "nginx", "ok": False, "msg": str(e)})
+        return steps
+
+    # Step 5: Start the agent
+    try:
+        ok, output = run_kroagent_cmd("start", name)
+        steps.append({"step": "start", "ok": ok, "msg": output})
+    except Exception as e:
+        steps.append({"step": "start", "ok": False, "msg": str(e)})
+
+    return steps
+
+
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -379,6 +556,50 @@ body {
 #no-agents h2 { color: #8b949e; font-size: 18px; margin-bottom: 12px; }
 #no-agents p { color: #484f58; font-size: 14px; }
 
+/* Create agent modal */
+#modal-overlay {
+  display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.7); z-index: 100;
+  justify-content: center; align-items: center;
+}
+#modal-overlay.visible { display: flex; }
+#create-modal {
+  background: #161b22; border: 1px solid #30363d; border-radius: 10px;
+  padding: 24px; width: 480px; max-width: 90vw;
+}
+#create-modal h2 { color: #58a6ff; font-size: 16px; margin-bottom: 16px; }
+#create-modal label { display: block; color: #8b949e; font-size: 12px; margin-bottom: 4px; margin-top: 12px; }
+#create-modal input {
+  width: 100%; background: #0d1117; border: 1px solid #30363d; color: #c9d1d9;
+  padding: 8px 10px; border-radius: 6px; font-family: inherit; font-size: 13px; outline: none;
+}
+#create-modal input:focus { border-color: #58a6ff; }
+#create-modal .hint { font-size: 11px; color: #484f58; margin-top: 2px; }
+#create-modal .modal-buttons { margin-top: 20px; display: flex; gap: 8px; justify-content: flex-end; }
+#create-modal .modal-buttons button {
+  padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; border: none;
+}
+#create-modal .btn-create { background: #238636; color: white; }
+#create-modal .btn-create:hover { background: #2ea043; }
+#create-modal .btn-create:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+#create-modal .btn-cancel { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+#create-modal .btn-cancel:hover { background: #30363d; }
+#create-steps {
+  margin-top: 16px; display: none;
+}
+#create-steps .step {
+  display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px;
+}
+#create-steps .step .icon { width: 16px; text-align: center; }
+#create-steps .step.ok .icon { color: #4ade80; }
+#create-steps .step.fail .icon { color: #f87171; }
+#create-steps .step.pending .icon { color: #fbbf24; }
+#create-steps .step .msg { color: #8b949e; }
+#topbar .btn-new-agent {
+  background: #238636; color: white; border: none; font-weight: 600;
+}
+#topbar .btn-new-agent:hover { background: #2ea043; }
+
 /* Drag and drop overlay per pane */
 .pane.dragging .pane-terminal {
   border: 2px dashed #58a6ff; background: #0d1117ee;
@@ -390,6 +611,7 @@ body {
   <h1>KroAgent Dashboard</h1>
   <span class="agent-count" id="agent-count"></span>
   <div class="controls">
+    <button class="btn-new-agent" onclick="openCreateModal()">+ New Agent</button>
     <button onclick="refreshAll()">Refresh All</button>
     <button onclick="location.reload()">Reload</button>
   </div>
@@ -408,7 +630,29 @@ body {
 <div id="grid" style="display:none;"></div>
 <div id="no-agents">
   <h2>No agents found</h2>
-  <p>Create agents with <code>kroagent create &lt;name&gt;</code> on kroclaw.</p>
+  <p>Create agents with <code>kroagent create &lt;name&gt;</code> on kroclaw, or click <b>+ New Agent</b> above.</p>
+</div>
+
+<div id="modal-overlay" onclick="if(event.target===this)closeCreateModal()">
+  <div id="create-modal">
+    <h2>Create New Agent</h2>
+    <label for="ca-name">Name</label>
+    <input id="ca-name" placeholder="my-agent" oninput="onNameInput()">
+    <div class="hint">Letters, numbers, hyphens, underscores. Must start with a letter.</div>
+    <label for="ca-desc">Description</label>
+    <input id="ca-desc" placeholder="What this agent does">
+    <label for="ca-port">Port</label>
+    <input id="ca-port" type="number" placeholder="auto">
+    <div class="hint">Leave blank for next available port.</div>
+    <label for="ca-workdir">Working Directory</label>
+    <input id="ca-workdir" placeholder="auto (~/kroagents/name)">
+    <div class="hint">Leave blank for default.</div>
+    <div id="create-steps"></div>
+    <div class="modal-buttons">
+      <button class="btn-cancel" onclick="closeCreateModal()">Cancel</button>
+      <button class="btn-create" id="btn-do-create" onclick="doCreateAgent()">Create Agent</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -815,10 +1059,12 @@ function toggleFullscreen(name) {
   }
 }
 
+// Escape key: modal takes priority, then fullscreen
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && fullscreenAgent) {
-    toggleFullscreen(fullscreenAgent);
-  }
+  if (e.key !== 'Escape') return;
+  const modal = document.getElementById('modal-overlay');
+  if (modal && modal.classList.contains('visible')) return; // modal handler will catch it
+  if (fullscreenAgent) toggleFullscreen(fullscreenAgent);
 });
 
 // --- Agent management ---
@@ -866,6 +1112,139 @@ function updateMgmtButtons(name, agentInfo) {
   if (stopBtn) stopBtn.disabled = !isOnline && !(agentInfo && agentInfo.tmux);
   if (restartBtn) restartBtn.disabled = !isOnline && !(agentInfo && agentInfo.tmux);
 }
+
+// --- Create agent modal ---
+const STEP_LABELS = {
+  validate: 'Validate',
+  create: 'Create workspace',
+  config: 'Configure agent',
+  dns: 'Add DNS record',
+  nginx: 'Configure nginx',
+  start: 'Start agent'
+};
+const ALL_STEPS = ['create', 'config', 'dns', 'nginx', 'start'];
+
+async function openCreateModal() {
+  document.getElementById('modal-overlay').classList.add('visible');
+  document.getElementById('ca-name').value = '';
+  document.getElementById('ca-desc').value = '';
+  document.getElementById('ca-workdir').value = '';
+  document.getElementById('create-steps').style.display = 'none';
+  document.getElementById('create-steps').innerHTML = '';
+  document.getElementById('btn-do-create').disabled = false;
+  document.getElementById('btn-do-create').textContent = 'Create Agent';
+  // Fetch next available port
+  try {
+    const resp = await fetch('/api/next-port?device_id=' + deviceId);
+    const data = await resp.json();
+    document.getElementById('ca-port').value = data.port || '';
+  } catch(e) {}
+  document.getElementById('ca-name').focus();
+}
+
+function closeCreateModal() {
+  document.getElementById('modal-overlay').classList.remove('visible');
+}
+
+function onNameInput() {
+  const name = document.getElementById('ca-name').value.trim();
+  const workdir = document.getElementById('ca-workdir');
+  if (!workdir.dataset.userEdited) {
+    workdir.placeholder = name ? `~/kroagents/${name}` : 'auto (~/kroagents/name)';
+  }
+}
+
+async function doCreateAgent() {
+  const name = document.getElementById('ca-name').value.trim();
+  const desc = document.getElementById('ca-desc').value.trim();
+  const port = document.getElementById('ca-port').value.trim();
+  const workdir = document.getElementById('ca-workdir').value.trim();
+
+  if (!name) { document.getElementById('ca-name').focus(); return; }
+
+  const btn = document.getElementById('btn-do-create');
+  btn.disabled = true;
+  btn.textContent = 'Creating...';
+
+  // Show pending steps
+  const stepsEl = document.getElementById('create-steps');
+  stepsEl.style.display = 'block';
+  stepsEl.innerHTML = ALL_STEPS.map(s =>
+    `<div class="step pending" id="step-${s}"><span class="icon">&#x25CB;</span><span>${STEP_LABELS[s]}</span><span class="msg"></span></div>`
+  ).join('');
+
+  try {
+    const resp = await fetch('/api/agents/create', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        name: name,
+        description: desc,
+        port: port ? parseInt(port) : 0,
+        workdir: workdir,
+        device_id: deviceId
+      })
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      stepsEl.innerHTML = `<div class="step fail"><span class="icon">&#x2717;</span><span>${escapeHtml(data.error)}</span></div>`;
+      btn.disabled = false;
+      btn.textContent = 'Create Agent';
+      return;
+    }
+
+    // Update step indicators from results
+    const completed = new Set();
+    for (const step of (data.steps || [])) {
+      completed.add(step.step);
+      const el = document.getElementById('step-' + step.step);
+      if (el) {
+        el.className = 'step ' + (step.ok ? 'ok' : 'fail');
+        el.querySelector('.icon').innerHTML = step.ok ? '&#x2713;' : '&#x2717;';
+        el.querySelector('.msg').textContent = step.msg || '';
+      }
+    }
+    // Mark remaining steps as skipped if there was a failure
+    if (!data.success) {
+      for (const s of ALL_STEPS) {
+        if (!completed.has(s)) {
+          const el = document.getElementById('step-' + s);
+          if (el) {
+            el.className = 'step fail';
+            el.querySelector('.icon').innerHTML = '&#x2014;';
+            el.querySelector('.msg').textContent = 'skipped';
+          }
+        }
+      }
+      btn.disabled = false;
+      btn.textContent = 'Retry';
+    } else {
+      btn.textContent = 'Done';
+      // Reload agents list after a moment
+      setTimeout(async () => {
+        await loadAgents();
+      }, 2000);
+    }
+  } catch(e) {
+    stepsEl.innerHTML = `<div class="step fail"><span class="icon">&#x2717;</span><span>Request failed: ${escapeHtml(e.message)}</span></div>`;
+    btn.disabled = false;
+    btn.textContent = 'Retry';
+  }
+}
+
+// Close modal on Escape (only if not in fullscreen)
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('modal-overlay').classList.contains('visible')) {
+    closeCreateModal();
+    e.stopPropagation();
+  }
+});
+
+// Track if user manually edited workdir
+document.getElementById('ca-workdir')?.addEventListener('input', function() {
+  this.dataset.userEdited = this.value.trim() ? 'true' : '';
+});
 
 // --- Init ---
 checkDashboardPairing();
@@ -975,6 +1354,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             result = proxy_to_agent(port, f"/buffer?device_id={device_id}")
             self._json(200, result)
 
+        elif parsed.path == "/api/next-port":
+            device_id = qs.get("device_id", [""])[0]
+            if not _is_paired(device_id):
+                self._json(403, {"error": "not paired"})
+                return
+            self._json(200, {"port": next_available_port()})
+
         elif parsed.path == "/status":
             self._json(200, {"status": "ok", "agents": len(discover_agents())})
 
@@ -1034,6 +1420,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             result = proxy_to_agent(port, "/upload", method="POST", body=body)
             self._json(200, result)
+
+        elif parsed.path == "/api/agents/create":
+            device_id = body.get("device_id", "")
+            if not _is_paired(device_id):
+                self._json(403, {"error": "not paired"})
+                return
+            name = body.get("name", "").strip()
+            description = body.get("description", "").strip() or f"{name} KroAgent"
+            port = body.get("port", 0)
+            workdir = body.get("workdir", "").strip()
+            if not name:
+                self._json(400, {"error": "Name is required"})
+                return
+            if not port:
+                port = next_available_port()
+            if not workdir:
+                workdir = str(KROAGENTS_DIR / name)
+            steps = create_agent(name, description, int(port), workdir)
+            all_ok = all(s["ok"] for s in steps)
+            self._json(200, {"success": all_ok, "steps": steps, "agent": name, "port": port})
 
         elif parsed.path.startswith("/api/agents/") and "/manage" in parsed.path:
             device_id = body.get("device_id", "")
