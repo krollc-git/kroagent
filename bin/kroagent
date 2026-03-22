@@ -18,6 +18,8 @@ usage() {
     echo "  kill-all        Kill ALL agents"
     echo "  approve <name> [id] Approve a pending device (or list pending)"
     echo "  create <name>   Scaffold a new agent workspace"
+    echo "  dashboard       Start the multi-pane dashboard"
+    echo "  dashboard-stop  Stop the dashboard"
     echo ""
 }
 
@@ -37,18 +39,24 @@ start_claude_agent() {
     local workdir=$(get_config "$name" "workdir")
     local port=$(get_config "$name" "port")
 
+    # Find claude binary
+    local claude_bin
+    claude_bin=$(command -v claude 2>/dev/null || echo "")
+    [ -z "$claude_bin" ] && [ -x "$HOME/.npm-global/bin/claude" ] && claude_bin="$HOME/.npm-global/bin/claude"
+    [ -z "$claude_bin" ] && { echo "ERROR: claude not found in PATH or ~/.npm-global/bin/"; exit 1; }
+
     # Start tmux session with Claude Code if not running
     if ! tmux has-session -t "$tmux_session" 2>/dev/null; then
         echo "Starting Claude Code session: $tmux_session"
         tmux new-session -d -s "$tmux_session" -c "$workdir" \
-            "claude --dangerously-skip-permissions"
+            "$claude_bin --dangerously-skip-permissions"
         sleep 3
     else
         echo "Tmux session $tmux_session already running"
     fi
 
     # Start web server if not running
-    if ! pgrep -f "KROAGENT_TMUX_SESSION=$tmux_session.*kroagent_server" >/dev/null 2>&1; then
+    if ! lsof -ti ":$port" >/dev/null 2>&1; then
         echo "Starting web server on port $port"
         KROAGENT_PORT=$port \
         KROAGENT_TMUX_SESSION=$tmux_session \
@@ -61,12 +69,22 @@ start_claude_agent() {
     fi
 }
 
+kill_web_server() {
+    # Kill web server by port — reliable regardless of how it was started
+    local port="$1"
+    local pid
+    pid=$(lsof -ti ":$port" 2>/dev/null | head -1)
+    if [ -n "$pid" ]; then
+        kill "$pid" 2>/dev/null || true
+    fi
+}
+
 stop_claude_agent() {
     local name="$1"
     local tmux_session=$(get_config "$name" "tmux_session")
+    local port=$(get_config "$name" "port")
 
-    # Stop web server
-    pkill -f "KROAGENT_TMUX_SESSION=$tmux_session.*kroagent_server" 2>/dev/null || true
+    kill_web_server "$port"
 
     # Don't kill tmux — session persists for reattach
     echo "Stopped web server for $name (tmux session $tmux_session preserved)"
@@ -333,7 +351,12 @@ else:
 "
     else
         # Approve via HTTP API (so server's in-memory state stays in sync)
-        local port=$(get_config "$name" "port")
+        local port
+        if [ "$name" = "dashboard" ]; then
+            port="${DASHBOARD_PORT:-18900}"
+        else
+            port=$(get_config "$name" "port")
+        fi
         # Find full device ID by prefix from pending list
         local full_id=$(python3 -c "
 import json, sys
@@ -372,8 +395,9 @@ cmd_kill() {
 
     if [ "$type" = "claude-code" ]; then
         local tmux_session=$(get_config "$name" "tmux_session")
-        # Kill web server
-        pkill -f "KROAGENT_TMUX_SESSION=$tmux_session.*kroagent_server" 2>/dev/null || true
+        local port=$(get_config "$name" "port")
+        # Kill web server by port
+        kill_web_server "$port"
         # Kill tmux session
         tmux kill-session -t "$tmux_session" 2>/dev/null || true
         echo "Killed $name (web server + tmux session)"
@@ -396,16 +420,41 @@ cmd_kill_all() {
     echo "All agents killed."
 }
 
+cmd_dashboard() {
+    local port="${DASHBOARD_PORT:-18900}"
+
+    if pgrep -f "dashboard_server.py" >/dev/null 2>&1; then
+        echo "Dashboard already running on port $port"
+        return
+    fi
+
+    echo "Starting dashboard on port $port"
+    DASHBOARD_PORT=$port \
+    KROAGENTS_DIR=$KROAGENTS_DIR \
+    DASHBOARD_BIND=127.0.0.1 \
+    nohup python3 "$KROAGENTS_DIR/web/dashboard_server.py" \
+        > "/tmp/kroagent-dashboard.log" 2>&1 &
+    echo "Dashboard PID: $!"
+    echo "Access at: https://kroagent-dashboard.\${KROAGENT_DOMAIN:-localhost}"
+}
+
+cmd_dashboard_stop() {
+    pkill -f "dashboard_server.py" 2>/dev/null || true
+    echo "Dashboard stopped"
+}
+
 case "${1:-}" in
-    start)    cmd_start "$2" ;;
-    stop)     cmd_stop "$2" ;;
-    restart)  cmd_restart "$2" ;;
-    kill)     cmd_kill "$2" ;;
-    kill-all) cmd_kill_all ;;
-    status)   cmd_status ;;
-    list)     cmd_list ;;
-    attach)   cmd_attach "$2" ;;
-    approve)  cmd_approve "$2" "$3" ;;
-    create)   cmd_create "$2" ;;
-    *)       usage ;;
+    start)          cmd_start "$2" ;;
+    stop)           cmd_stop "$2" ;;
+    restart)        cmd_restart "$2" ;;
+    kill)           cmd_kill "$2" ;;
+    kill-all)       cmd_kill_all ;;
+    status)         cmd_status ;;
+    list)           cmd_list ;;
+    attach)         cmd_attach "$2" ;;
+    approve)        cmd_approve "$2" "$3" ;;
+    create)         cmd_create "$2" ;;
+    dashboard)      cmd_dashboard ;;
+    dashboard-stop) cmd_dashboard_stop ;;
+    *)             usage ;;
 esac
