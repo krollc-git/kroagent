@@ -204,8 +204,8 @@ def agent_status(name):
 
 
 def run_kroagent_cmd(action, name):
-    """Run a kroagent CLI command (start/stop/restart/kill). Returns (success, output)."""
-    if action not in ("start", "stop", "restart", "kill"):
+    """Run a kroagent CLI command (start/stop/restart). Returns (success, output)."""
+    if action not in ("start", "stop", "restart"):
         return False, f"Invalid action: {action}"
     # Validate agent name: alphanumeric, hyphens, underscores only
     if not re.match(r'^[a-zA-Z0-9_-]+$', name):
@@ -755,7 +755,7 @@ async function loadAgents() {
       return;
     }
     const allAgents = data.agents || [];
-    const newAgents = allAgents.filter(a => a.tmux || a.web);
+    const newAgents = allAgents.filter(a => a.web);
     const newNames = newAgents.map(a => a.name).join(',');
     const oldNames = agents.map(a => a.name).join(',');
     agents = newAgents;
@@ -811,7 +811,7 @@ function renderGrid() {
         <div class="status-dot checking" id="dot-${name}"></div>
         <span class="agent-name" ondblclick="toggleFullscreen('${name}')" title="Double-click to maximize">${escapeHtml(name)}</span>
         <div class="pane-controls">
-          <button onclick="confirmStop('${name}')" id="stop-btn-${name}" class="mgmt-btn stop-btn" title="Stop agent (kills session)">Stop</button>
+          <button onclick="confirmStop('${name}')" id="stop-btn-${name}" class="mgmt-btn stop-btn" title="Stop agent web server (session preserved)">Stop</button>
           <button onclick="manageAgent('${name}','restart')" id="restart-btn-${name}" class="mgmt-btn restart-btn" title="Restart agent">Restart</button>
           <span class="sep">|</span>
           <button onclick="sendAgentKey('${name}','Escape')" title="Escape">Esc</button>
@@ -839,6 +839,12 @@ function renderGrid() {
       const atBottom = term.scrollHeight - term.scrollTop - term.clientHeight < 50;
       paneStates[name].userScrolled = !atBottom;
     });
+
+    // Restore cached buffer immediately so pane isn't blank during rebuild
+    if (paneStates[name].lastBuffer) {
+      term.innerHTML = escapeHtml(paneStates[name].lastBuffer);
+      term.scrollTop = term.scrollHeight;
+    }
 
     // Image paste per pane
     const input = pane.querySelector('textarea');
@@ -1131,20 +1137,14 @@ async function manageAgent(name, action) {
   if (btn) { btn.textContent = action.charAt(0).toUpperCase() + action.slice(1); btn.classList.remove('running'); }
 
   // Wait a moment for processes to settle, then refresh
-  const delay = action === 'start' ? 3000 : action === 'kill' ? 3000 : 1000;
+  const delay = action === 'start' ? 3000 : 2000;
   setTimeout(async () => {
     await loadAgents();
-    if (action !== 'kill') refreshPane(name);
-    // For kill, do a second check in case tmux was slow to die
-    if (action === 'kill') {
-      setTimeout(() => loadAgents(), 3000);
-    }
+    if (action !== 'stop') refreshPane(name);
   }, delay);
 }
 
 function confirmStop(name) {
-  if (!confirm(`Stop ${name}? This will kill the tmux session and Claude Code instance. The agent will disappear from the dashboard.`)) return;
-
   // Exit fullscreen if this pane is maximized
   if (fullscreenAgent === name) toggleFullscreen(name);
 
@@ -1154,7 +1154,7 @@ function confirmStop(name) {
     paneStates[name].refreshTimer = null;
   }
 
-  manageAgent(name, 'kill');
+  manageAgent(name, 'stop');
 }
 
 // --- Start agent modal ---
@@ -1477,7 +1477,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not name:
                     continue
                 status = agent_status(name)
-                if not status["tmux"] and not status["web"]:
+                if not status["web"]:
                     stopped.append({
                         "name": name,
                         "description": a.get("description", ""),
@@ -1579,7 +1579,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             name = parsed.path.split("/api/agents/")[1].split("/manage")[0]
             action = body.get("action", "")
-            if action not in ("start", "stop", "restart", "kill"):
+            if action not in ("start", "stop", "restart"):
                 self._json(400, {"error": f"Invalid action: {action}"})
                 return
             ok, output = run_kroagent_cmd(action, name)
