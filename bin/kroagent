@@ -241,7 +241,12 @@ cmd_create() {
   "domain": "${name}.${KROAGENT_DOMAIN:-localhost}",
   "backend": "tmux",
   "tmux_session": "kroagent-${name}",
-  "workdir": "$dir"
+  "workdir": "$dir",
+  "backends": {
+    "claude": "claude --dangerously-skip-permissions",
+    "codex": "codex --full-auto"
+  },
+  "current_backend": "claude"
 }
 EOF
 

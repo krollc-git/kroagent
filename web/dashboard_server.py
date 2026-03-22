@@ -256,7 +256,7 @@ def next_available_port():
     return port
 
 
-def create_agent(name, description, port, workdir):
+def create_agent(name, description, port, workdir, initial_backend="claude"):
     """Create a new agent end-to-end. Returns list of step results."""
     steps = []
 
@@ -289,8 +289,10 @@ def create_agent(name, description, port, workdir):
         config["description"] = description
         config["workdir"] = workdir
         config["domain"] = f"{name}.{DOMAIN}"
+        if initial_backend and "backends" in config and initial_backend in config["backends"]:
+            config["current_backend"] = initial_backend
         config_file.write_text(json.dumps(config, indent=2) + "\n")
-        steps.append({"step": "config", "ok": True, "msg": f"Set port={port}, workdir={workdir}"})
+        steps.append({"step": "config", "ok": True, "msg": f"Set port={port}, backend={initial_backend}"})
     except Exception as e:
         steps.append({"step": "config", "ok": False, "msg": str(e)})
         return steps
@@ -703,6 +705,12 @@ body {
     <label for="ca-workdir">Working Directory</label>
     <input id="ca-workdir" placeholder="auto (~/kroagents/name)">
     <div class="hint">Leave blank for default.</div>
+    <label for="ca-backend">Start With</label>
+    <select id="ca-backend" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:8px 10px;border-radius:6px;font-family:inherit;font-size:13px;">
+      <option value="claude">Claude (claude --dangerously-skip-permissions)</option>
+      <option value="codex">Codex (codex --full-auto)</option>
+    </select>
+    <div class="hint">Both backends will be available. You can switch later.</div>
     <div id="create-steps"></div>
     <div class="modal-buttons">
       <button class="btn-cancel" onclick="closeCreateModal()">Cancel</button>
@@ -1391,6 +1399,7 @@ async function doCreateAgent() {
   const desc = document.getElementById('ca-desc').value.trim();
   const port = document.getElementById('ca-port').value.trim();
   const workdir = document.getElementById('ca-workdir').value.trim();
+  const backend = document.getElementById('ca-backend').value;
 
   if (!name) { document.getElementById('ca-name').focus(); return; }
 
@@ -1414,6 +1423,7 @@ async function doCreateAgent() {
         description: desc,
         port: port ? parseInt(port) : 0,
         workdir: workdir,
+        backend: backend,
         device_id: deviceId
       })
     });
@@ -1780,7 +1790,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 port = next_available_port()
             if not workdir:
                 workdir = str(KROAGENTS_DIR / name)
-            steps = create_agent(name, description, int(port), workdir)
+            initial_backend = body.get("backend", "claude")
+            steps = create_agent(name, description, int(port), workdir, initial_backend)
             all_ok = all(s["ok"] for s in steps)
             self._json(200, {"success": all_ok, "steps": steps, "agent": name, "port": port})
 
