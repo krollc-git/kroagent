@@ -177,6 +177,20 @@ body {
 }
 #input-bar button:hover { background: #2ea043; }
 #input-bar button:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+#input-bar .img-preview {
+  position: relative; display: inline-block; flex-shrink: 0;
+}
+#input-bar .img-preview img {
+  height: 60px; border-radius: 4px; border: 1px solid #30363d;
+}
+#input-bar .img-preview .remove {
+  position: absolute; top: -6px; right: -6px;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #f87171; color: #fff; border: none;
+  font-size: 12px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+#input-bar .img-preview .remove:hover { background: #ef4444; }
 body.dragging #terminal {
   border: 2px dashed #58a6ff;
   background: #0d1117ee;
@@ -362,24 +376,42 @@ function toggleAutoRefresh() {
 
 async function sendMessage() {
   const msg = inputEl.value;
-  if (!msg.trim()) return;
+  const hasImage = !!pendingImage;
+  if (!msg.trim() && !hasImage) return;
   inputEl.value = '';
+  inputEl.style.height = 'auto';
   sendBtn.disabled = true;
 
   try {
-    const resp = await fetch('/send', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({text: msg, device_id: deviceId})
-    });
-    const data = await resp.json();
-    if (data.error === 'not paired') {
-      paired = false;
-      checkAuth();
-    } else {
-      setTimeout(refreshBuffer, 500);
-      setTimeout(refreshBuffer, 2000);
-      setTimeout(refreshBuffer, 5000);
+    let fullMsg = msg;
+
+    // Upload staged image first if present
+    if (hasImage) {
+      const imgPath = await uploadStagedImage();
+      if (imgPath) {
+        if (fullMsg.trim()) {
+          fullMsg = fullMsg.trim() + ' [Image: ' + imgPath + ']';
+        } else {
+          fullMsg = 'Please look at this image: ' + imgPath;
+        }
+      }
+    }
+
+    if (fullMsg.trim()) {
+      const resp = await fetch('/send', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: fullMsg, device_id: deviceId})
+      });
+      const data = await resp.json();
+      if (data.error === 'not paired') {
+        paired = false;
+        checkAuth();
+      } else {
+        setTimeout(refreshBuffer, 500);
+        setTimeout(refreshBuffer, 2000);
+        setTimeout(refreshBuffer, 5000);
+      }
     }
   } catch(e) {
     console.error('Send error:', e);
@@ -414,33 +446,55 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
 });
 
-// --- Image paste and drag-and-drop ---
-async function uploadImage(blob, source) {
+// --- Image paste and drag-and-drop (staged) ---
+let pendingImage = null; // {blob, dataUrl}
+
+function stageImage(blob) {
   const reader = new FileReader();
-  reader.onload = async () => {
-    const base64 = reader.result.split(',')[1];
-    const ext = blob.type.split('/')[1] || 'png';
-    try {
-      const resp = await fetch('/upload', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({image: base64, ext: ext, device_id: deviceId, source: source})
-      });
-      const data = await resp.json();
-      if (data.path) {
-        const notice = document.createElement('div');
-        notice.className = 'upload-notice';
-        notice.textContent = 'Image uploaded: ' + data.path;
-        document.body.insertBefore(notice, document.getElementById('input-bar'));
-        setTimeout(() => notice.remove(), 5000);
-        setTimeout(refreshBuffer, 1000);
-        setTimeout(refreshBuffer, 3000);
-      }
-    } catch(e) {
-      console.error('Upload error:', e);
+  reader.onload = () => {
+    pendingImage = {blob: blob, dataUrl: reader.result};
+    // Show preview in input bar
+    let preview = document.getElementById('img-preview');
+    if (!preview) {
+      preview = document.createElement('div');
+      preview.id = 'img-preview';
+      preview.className = 'img-preview';
+      const inputBar = document.getElementById('input-bar');
+      inputBar.insertBefore(preview, inputEl);
     }
+    preview.innerHTML = '';
+    const img = document.createElement('img');
+    img.src = reader.result;
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove';
+    removeBtn.textContent = 'x';
+    removeBtn.onclick = () => { pendingImage = null; preview.remove(); };
+    preview.appendChild(img);
+    preview.appendChild(removeBtn);
+    inputEl.focus();
   };
   reader.readAsDataURL(blob);
+}
+
+async function uploadStagedImage() {
+  if (!pendingImage) return null;
+  const base64 = pendingImage.dataUrl.split(',')[1];
+  const ext = pendingImage.blob.type.split('/')[1] || 'png';
+  try {
+    const resp = await fetch('/upload', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({image: base64, ext: ext, device_id: deviceId})
+    });
+    const data = await resp.json();
+    pendingImage = null;
+    const preview = document.getElementById('img-preview');
+    if (preview) preview.remove();
+    return data.path || null;
+  } catch(e) {
+    console.error('Upload error:', e);
+    return null;
+  }
 }
 
 // Ctrl+V paste
@@ -451,14 +505,13 @@ document.addEventListener('paste', e => {
   for (const item of items) {
     if (item.type.startsWith('image/')) {
       e.preventDefault();
-      uploadImage(item.getAsFile(), 'paste');
+      stageImage(item.getAsFile());
       return;
     }
   }
 });
 
 // Drag and drop
-const termEl = document.getElementById('terminal');
 let dragCounter = 0;
 
 document.addEventListener('dragenter', e => {
@@ -488,7 +541,7 @@ document.addEventListener('drop', e => {
   if (!files) return;
   for (const file of files) {
     if (file.type.startsWith('image/')) {
-      uploadImage(file, 'drop');
+      stageImage(file);
       return;
     }
   }
@@ -604,15 +657,12 @@ class Handler(BaseHTTPRequestHandler):
             if not image_b64:
                 self._json(400, {"error": "no image data"})
                 return
-            # Save to uploads dir
+            # Save to uploads dir (don't send to tmux — sendMessage handles that)
             UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
             filename = f"image-{ts}.{ext}"
             filepath = UPLOADS_DIR / filename
             filepath.write_bytes(base64.b64decode(image_b64))
-            # Tell the agent about it
-            msg = f"[Image uploaded to {filepath}] Please look at this image."
-            send_to_pane(msg)
             self._json(200, {"path": str(filepath), "filename": filename})
 
         elif parsed.path == "/key":
