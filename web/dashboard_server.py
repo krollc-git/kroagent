@@ -204,8 +204,8 @@ def agent_status(name):
 
 
 def run_kroagent_cmd(action, name):
-    """Run a kroagent CLI command (start/stop/restart). Returns (success, output)."""
-    if action not in ("start", "stop", "restart"):
+    """Run a kroagent CLI command (start/stop/restart/kill). Returns (success, output)."""
+    if action not in ("start", "stop", "restart", "kill"):
         return False, f"Invalid action: {action}"
     # Validate agent name: alphanumeric, hyphens, underscores only
     if not re.match(r'^[a-zA-Z0-9_-]+$', name):
@@ -502,7 +502,6 @@ body {
 .pane-header button:hover { background: #30363d; color: #c9d1d9; }
 .pane-header .sep { color: #30363d; font-size: 10px; margin: 0 2px; }
 .pane-header .mgmt-btn { font-weight: 600; }
-.pane-header .start-btn { color: #4ade80; }
 .pane-header .stop-btn { color: #f87171; }
 .pane-header .restart-btn { color: #fbbf24; }
 .pane-header .mgmt-btn:disabled { color: #484f58; cursor: not-allowed; }
@@ -556,13 +555,15 @@ body {
 #no-agents h2 { color: #8b949e; font-size: 18px; margin-bottom: 12px; }
 #no-agents p { color: #484f58; font-size: 14px; }
 
-/* Create agent modal */
-#modal-overlay {
+/* Modal overlays */
+#modal-overlay, .modal-overlay-generic {
   display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
   background: rgba(0,0,0,0.7); z-index: 100;
   justify-content: center; align-items: center;
 }
-#modal-overlay.visible { display: flex; }
+#modal-overlay.visible, .modal-overlay-generic.visible { display: flex; }
+
+/* Create agent modal */
 #create-modal {
   background: #161b22; border: 1px solid #30363d; border-radius: 10px;
   padding: 24px; width: 480px; max-width: 90vw;
@@ -599,6 +600,37 @@ body {
   background: #238636; color: white; border: none; font-weight: 600;
 }
 #topbar .btn-new-agent:hover { background: #2ea043; }
+#topbar .btn-start-agent {
+  background: #1f6feb; color: white; border: none; font-weight: 600;
+}
+#topbar .btn-start-agent:hover { background: #388bfd; }
+
+/* Start agent modal */
+#start-modal {
+  background: #161b22; border: 1px solid #30363d; border-radius: 10px;
+  padding: 24px; width: 400px; max-width: 90vw;
+}
+#start-modal h2 { color: #58a6ff; font-size: 16px; margin-bottom: 16px; }
+#start-modal .agent-list { max-height: 300px; overflow-y: auto; }
+#start-modal .agent-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px; border: 1px solid #30363d; border-radius: 6px;
+  margin-bottom: 6px; cursor: pointer; transition: border-color 0.15s;
+}
+#start-modal .agent-item:hover { border-color: #58a6ff; }
+#start-modal .agent-item .agent-info { flex: 1; }
+#start-modal .agent-item .agent-item-name { color: #c9d1d9; font-size: 13px; font-weight: 600; }
+#start-modal .agent-item .agent-item-desc { color: #8b949e; font-size: 11px; margin-top: 2px; }
+#start-modal .agent-item .agent-item-btn {
+  background: #238636; color: white; border: none;
+  padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500;
+}
+#start-modal .agent-item .agent-item-btn:hover { background: #2ea043; }
+#start-modal .agent-item .agent-item-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+#start-modal .no-agents { color: #8b949e; font-size: 13px; text-align: center; padding: 20px; }
+#start-modal .modal-buttons { margin-top: 16px; display: flex; justify-content: flex-end; }
+#start-modal .btn-cancel { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+#start-modal .btn-cancel:hover { background: #30363d; }
 
 /* Drag and drop overlay per pane */
 .pane.dragging .pane-terminal {
@@ -612,6 +644,7 @@ body {
   <span class="agent-count" id="agent-count"></span>
   <div class="controls">
     <button class="btn-new-agent" onclick="openCreateModal()">+ New Agent</button>
+    <button class="btn-start-agent" onclick="openStartModal()">Start Agent</button>
     <button onclick="refreshAll()">Refresh All</button>
     <button onclick="location.reload()">Reload</button>
   </div>
@@ -651,6 +684,18 @@ body {
     <div class="modal-buttons">
       <button class="btn-cancel" onclick="closeCreateModal()">Cancel</button>
       <button class="btn-create" id="btn-do-create" onclick="doCreateAgent()">Create Agent</button>
+    </div>
+  </div>
+</div>
+
+<div id="start-overlay" class="modal-overlay-generic" onclick="if(event.target===this)closeStartModal()">
+  <div id="start-modal">
+    <h2>Start Agent</h2>
+    <div class="agent-list" id="start-agent-list">
+      <div class="no-agents">Loading...</div>
+    </div>
+    <div class="modal-buttons">
+      <button class="btn-cancel" onclick="closeStartModal()">Close</button>
     </div>
   </div>
 </div>
@@ -717,10 +762,6 @@ async function loadAgents() {
     if (newNames !== oldNames) {
       renderGrid();
     }
-    // Update management buttons based on live status
-    for (const agent of agents) {
-      updateMgmtButtons(agent.name, agent);
-    }
     refreshAll();
   } catch(e) {
     console.error('Load agents error:', e);
@@ -769,8 +810,7 @@ function renderGrid() {
         <div class="status-dot checking" id="dot-${name}"></div>
         <span class="agent-name" ondblclick="toggleFullscreen('${name}')" title="Double-click to maximize">${escapeHtml(name)}</span>
         <div class="pane-controls">
-          <button onclick="manageAgent('${name}','start')" id="start-btn-${name}" class="mgmt-btn start-btn" title="Start agent">Start</button>
-          <button onclick="manageAgent('${name}','stop')" id="stop-btn-${name}" class="mgmt-btn stop-btn" title="Stop agent">Stop</button>
+          <button onclick="confirmStop('${name}')" id="stop-btn-${name}" class="mgmt-btn stop-btn" title="Stop agent (kills session)">Stop</button>
           <button onclick="manageAgent('${name}','restart')" id="restart-btn-${name}" class="mgmt-btn restart-btn" title="Restart agent">Restart</button>
           <span class="sep">|</span>
           <button onclick="sendAgentKey('${name}','Escape')" title="Escape">Esc</button>
@@ -1059,13 +1099,7 @@ function toggleFullscreen(name) {
   }
 }
 
-// Escape key: modal takes priority, then fullscreen
-document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape') return;
-  const modal = document.getElementById('modal-overlay');
-  if (modal && modal.classList.contains('visible')) return; // modal handler will catch it
-  if (fullscreenAgent) toggleFullscreen(fullscreenAgent);
-});
+// Fullscreen Escape is handled by the unified Escape handler below
 
 // --- Agent management ---
 async function manageAgent(name, action) {
@@ -1073,7 +1107,7 @@ async function manageAgent(name, action) {
   if (btn) { btn.disabled = true; btn.classList.add('running'); btn.textContent = action + '...'; }
 
   // Disable all mgmt buttons for this agent during the operation
-  ['start', 'stop', 'restart'].forEach(a => {
+  ['stop', 'restart'].forEach(a => {
     const b = document.getElementById(a + '-btn-' + name);
     if (b) b.disabled = true;
   });
@@ -1095,22 +1129,81 @@ async function manageAgent(name, action) {
   // Restore button text
   if (btn) { btn.textContent = action.charAt(0).toUpperCase() + action.slice(1); btn.classList.remove('running'); }
 
-  // Wait a moment for processes to settle, then refresh status
+  // Wait a moment for processes to settle, then refresh
   setTimeout(async () => {
     await loadAgents();
-    refreshPane(name);
+    if (action !== 'kill') refreshPane(name);
   }, action === 'start' ? 3000 : 1000);
 }
 
-function updateMgmtButtons(name, agentInfo) {
-  const isOnline = agentInfo && agentInfo.tmux && agentInfo.web;
-  const startBtn = document.getElementById('start-btn-' + name);
-  const stopBtn = document.getElementById('stop-btn-' + name);
-  const restartBtn = document.getElementById('restart-btn-' + name);
+function confirmStop(name) {
+  if (!confirm(`Stop ${name}? This will kill the tmux session and Claude Code instance. The agent will disappear from the dashboard.`)) return;
 
-  if (startBtn) startBtn.disabled = isOnline;
-  if (stopBtn) stopBtn.disabled = !isOnline && !(agentInfo && agentInfo.tmux);
-  if (restartBtn) restartBtn.disabled = !isOnline && !(agentInfo && agentInfo.tmux);
+  // Exit fullscreen if this pane is maximized
+  if (fullscreenAgent === name) toggleFullscreen(name);
+
+  manageAgent(name, 'kill');
+}
+
+// --- Start agent modal ---
+async function openStartModal() {
+  const overlay = document.getElementById('start-overlay');
+  const list = document.getElementById('start-agent-list');
+  overlay.classList.add('visible');
+  list.innerHTML = '<div class="no-agents">Loading...</div>';
+
+  try {
+    const resp = await fetch('/api/stopped-agents?device_id=' + deviceId);
+    const data = await resp.json();
+    const stopped = data.agents || [];
+
+    if (stopped.length === 0) {
+      list.innerHTML = '<div class="no-agents">All agents are already running.</div>';
+      return;
+    }
+
+    list.innerHTML = stopped.map(a => `
+      <div class="agent-item" id="start-item-${a.name}">
+        <div class="agent-info">
+          <div class="agent-item-name">${escapeHtml(a.name)}</div>
+          <div class="agent-item-desc">${escapeHtml(a.description || '')} (port ${a.port})</div>
+        </div>
+        <button class="agent-item-btn" id="start-agent-btn-${a.name}" onclick="startAgentFromModal('${a.name}')">Start</button>
+      </div>
+    `).join('');
+  } catch(e) {
+    list.innerHTML = '<div class="no-agents">Error loading agents.</div>';
+  }
+}
+
+function closeStartModal() {
+  document.getElementById('start-overlay').classList.remove('visible');
+}
+
+async function startAgentFromModal(name) {
+  const btn = document.getElementById('start-agent-btn-' + name);
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
+
+  try {
+    const resp = await fetch(`/api/agents/${name}/manage`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'start', device_id: deviceId})
+    });
+    const data = await resp.json();
+    if (data.success) {
+      if (btn) { btn.textContent = 'Started'; }
+      // Reload agents after a delay so the new pane appears
+      setTimeout(async () => {
+        await loadAgents();
+      }, 3000);
+    } else {
+      if (btn) { btn.textContent = 'Failed'; btn.disabled = false; }
+      console.error(`Start ${name} failed:`, data.output);
+    }
+  } catch(e) {
+    if (btn) { btn.textContent = 'Error'; btn.disabled = false; }
+  }
 }
 
 // --- Create agent modal ---
@@ -1233,12 +1326,18 @@ async function doCreateAgent() {
   }
 }
 
-// Close modal on Escape (only if not in fullscreen)
+// Unified Escape handler (priority: start modal > create modal > fullscreen)
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && document.getElementById('modal-overlay').classList.contains('visible')) {
-    closeCreateModal();
-    e.stopPropagation();
+  if (e.key !== 'Escape') return;
+  const startOverlay = document.getElementById('start-overlay');
+  if (startOverlay && startOverlay.classList.contains('visible')) {
+    closeStartModal(); return;
   }
+  const createOverlay = document.getElementById('modal-overlay');
+  if (createOverlay && createOverlay.classList.contains('visible')) {
+    closeCreateModal(); return;
+  }
+  if (fullscreenAgent) toggleFullscreen(fullscreenAgent);
 });
 
 // Track if user manually edited workdir
@@ -1354,6 +1453,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             result = proxy_to_agent(port, f"/buffer?device_id={device_id}")
             self._json(200, result)
 
+        elif parsed.path == "/api/stopped-agents":
+            device_id = qs.get("device_id", [""])[0]
+            if not _is_paired(device_id):
+                self._json(403, {"error": "not paired"})
+                return
+            agents = discover_agents()
+            stopped = []
+            for a in agents:
+                name = a.get("name", "")
+                if not name:
+                    continue
+                status = agent_status(name)
+                if not status["tmux"] and not status["web"]:
+                    stopped.append({
+                        "name": name,
+                        "description": a.get("description", ""),
+                        "port": a.get("port", 0),
+                    })
+            self._json(200, {"agents": stopped})
+
         elif parsed.path == "/api/next-port":
             device_id = qs.get("device_id", [""])[0]
             if not _is_paired(device_id):
@@ -1448,7 +1567,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             name = parsed.path.split("/api/agents/")[1].split("/manage")[0]
             action = body.get("action", "")
-            if action not in ("start", "stop", "restart"):
+            if action not in ("start", "stop", "restart", "kill"):
                 self._json(400, {"error": f"Invalid action: {action}"})
                 return
             ok, output = run_kroagent_cmd(action, name)
