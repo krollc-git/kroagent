@@ -18,6 +18,8 @@ usage() {
     echo "  kill-all        Kill ALL agents"
     echo "  approve <name> [id] Approve a pending device (or list pending)"
     echo "  create <name>   Scaffold a new agent workspace"
+    echo "  suspend <name>  Suspend agent (save session, stop)"
+    echo "  resume <name>   Resume a suspended agent"
     echo "  switch <name> <backend>  Switch agent to a different backend"
     echo "  dashboard       Start the multi-pane dashboard"
     echo "  dashboard-stop  Stop the dashboard"
@@ -45,6 +47,42 @@ elif d.get('type') == 'claude-code':
     print('claude --dangerously-skip-permissions')
 else:
     print('')
+"
+}
+
+get_resume_command() {
+    # Get the launch command with resume flags appended.
+    local name="$1"
+    python3 -c "
+import json
+d = json.load(open('$KROAGENTS_DIR/$name/agent.json'))
+backends = d.get('backends', {})
+current = d.get('current_backend', '')
+if backends and current and current in backends:
+    cmd = backends[current]
+else:
+    cmd = 'claude --dangerously-skip-permissions'
+# Append resume flag based on backend
+binary = cmd.split()[0]
+if binary == 'claude':
+    print(cmd + ' --continue')
+elif binary == 'codex':
+    print('codex resume --last')
+else:
+    print(cmd)
+"
+}
+
+set_config() {
+    local name="$1"
+    local key="$2"
+    local value="$3"
+    python3 -c "
+import json
+f = '$KROAGENTS_DIR/$name/agent.json'
+d = json.load(open(f))
+d['$key'] = $value
+open(f, 'w').write(json.dumps(d, indent=2) + '\n')
 "
 }
 
@@ -484,6 +522,92 @@ cmd_dashboard_stop() {
     echo "Dashboard stopped"
 }
 
+cmd_suspend() {
+    local name="$1"
+    [ -z "$name" ] && { echo "Usage: kroagent suspend <name>"; exit 1; }
+    agent_exists "$name" || { echo "Agent '$name' not found"; exit 1; }
+
+    local tmux_session=$(get_config "$name" "tmux_session")
+    local port=$(get_config "$name" "port")
+
+    if ! tmux has-session -t "$tmux_session" 2>/dev/null; then
+        echo "Agent '$name' is not running"
+        exit 1
+    fi
+
+    echo "Suspending $name..."
+
+    # Send Escape to interrupt any in-progress work
+    tmux send-keys -t "$tmux_session" Escape
+    sleep 1
+
+    # Send /exit to cleanly exit Claude Code
+    tmux send-keys -t "$tmux_session" "/exit" Enter
+    sleep 3
+
+    # Kill tmux session
+    tmux kill-session -t "$tmux_session" 2>/dev/null || true
+
+    # Kill web server
+    kill_web_server "$port"
+
+    # Mark as suspended
+    set_config "$name" "suspended" "true"
+
+    echo "Suspended $name (session saved, use 'kroagent resume $name' to continue)"
+}
+
+cmd_resume() {
+    local name="$1"
+    [ -z "$name" ] && { echo "Usage: kroagent resume <name>"; exit 1; }
+    agent_exists "$name" || { echo "Agent '$name' not found"; exit 1; }
+
+    local tmux_session=$(get_config "$name" "tmux_session")
+    local workdir=$(get_config "$name" "workdir")
+    local port=$(get_config "$name" "port")
+
+    # Get resume command (with --continue or resume --last)
+    local launch_cmd
+    launch_cmd=$(get_resume_command "$name")
+    [ -z "$launch_cmd" ] && { echo "ERROR: No launch command configured for $name"; exit 1; }
+
+    # Resolve binary
+    local cmd_binary="${launch_cmd%% *}"
+    local cmd_args="${launch_cmd#* }"
+    [ "$cmd_args" = "$launch_cmd" ] && cmd_args=""
+    local resolved_bin
+    resolved_bin=$(resolve_binary "$cmd_binary")
+    [ -z "$resolved_bin" ] && { echo "ERROR: $cmd_binary not found"; exit 1; }
+    local full_cmd="$resolved_bin${cmd_args:+ $cmd_args}"
+
+    # Start tmux session with resume command
+    if ! tmux has-session -t "$tmux_session" 2>/dev/null; then
+        echo "Resuming $name..."
+        tmux new-session -d -s "$tmux_session" -c "$workdir" "$full_cmd"
+        sleep 3
+    else
+        echo "Tmux session $tmux_session already running"
+    fi
+
+    # Start web server
+    if ! lsof -ti ":$port" >/dev/null 2>&1; then
+        echo "Starting web server on port $port"
+        KROAGENT_PORT=$port \
+        KROAGENT_TMUX_SESSION=$tmux_session \
+        KROAGENT_NAME=$name \
+        nohup python3 "$KROAGENTS_DIR/web/kroagent_server.py" \
+            > "/tmp/kroagent-${name}-web.log" 2>&1 &
+        echo "Web server PID: $!"
+    else
+        echo "Web server already running"
+    fi
+
+    # Clear suspended flag
+    set_config "$name" "suspended" "false"
+
+    echo "Resumed $name"
+}
+
 cmd_switch() {
     local name="$1"
     local backend="$2"
@@ -540,6 +664,8 @@ case "${1:-}" in
     attach)         cmd_attach "$2" ;;
     approve)        cmd_approve "$2" "$3" ;;
     create)         cmd_create "$2" ;;
+    suspend)        cmd_suspend "$2" ;;
+    resume)         cmd_resume "$2" ;;
     switch)         cmd_switch "$2" "$3" ;;
     dashboard)      cmd_dashboard ;;
     dashboard-stop) cmd_dashboard_stop ;;

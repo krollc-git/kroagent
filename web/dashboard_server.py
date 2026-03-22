@@ -205,7 +205,7 @@ def agent_status(name):
 
 def run_kroagent_cmd(action, name, extra_args=None):
     """Run a kroagent CLI command. Returns (success, output)."""
-    if action not in ("start", "stop", "restart", "kill", "switch"):
+    if action not in ("start", "stop", "restart", "kill", "switch", "suspend", "resume"):
         return False, f"Invalid action: {action}"
     # Validate agent name: alphanumeric, hyphens, underscores only
     if not re.match(r'^[a-zA-Z0-9_-]+$', name):
@@ -519,6 +519,7 @@ body {
 .pane-header .sep { color: #30363d; font-size: 10px; margin: 0 2px; }
 .pane-header .mgmt-btn { font-weight: 600; }
 .pane-header .close-btn { color: #8b949e; }
+.pane-header .suspend-btn { color: #a78bfa; }
 .pane-header .stop-btn { color: #f87171; }
 .pane-header .restart-btn { color: #fbbf24; }
 .pane-header .mgmt-btn:disabled { color: #484f58; cursor: not-allowed; }
@@ -620,6 +621,10 @@ body {
   background: #238636; color: white; border: none; font-weight: 600;
 }
 #topbar .btn-new-agent:hover { background: #2ea043; }
+#topbar .btn-resume-agent {
+  background: #7c3aed; color: white; border: none; font-weight: 600;
+}
+#topbar .btn-resume-agent:hover { background: #8b5cf6; }
 #topbar .btn-start-agent {
   background: #1a7f37; color: white; border: none; font-weight: 600;
 }
@@ -670,6 +675,7 @@ body {
     <button class="btn-new-agent" onclick="openCreateModal()">+ New Agent</button>
     <button class="btn-start-agent" onclick="openStartAgentModal()">Start Agent</button>
     <button class="btn-reconnect-agent" onclick="openStartModal()">Reconnect Agent</button>
+    <button class="btn-resume-agent" onclick="openResumeModal()">Resume Agent</button>
     <button onclick="refreshAll()">Refresh All</button>
     <button onclick="location.reload()">Reload</button>
   </div>
@@ -715,6 +721,18 @@ body {
     <div class="modal-buttons">
       <button class="btn-cancel" onclick="closeCreateModal()">Cancel</button>
       <button class="btn-create" id="btn-do-create" onclick="doCreateAgent()">Create Agent</button>
+    </div>
+  </div>
+</div>
+
+<div id="resume-overlay" class="modal-overlay-generic" onclick="if(event.target===this)closeResumeModal()">
+  <div id="start-modal">
+    <h2>Resume Agent</h2>
+    <div class="agent-list" id="resume-agent-list">
+      <div class="no-agents">Loading...</div>
+    </div>
+    <div class="modal-buttons">
+      <button class="btn-cancel" onclick="closeResumeModal()">Close</button>
     </div>
   </div>
 </div>
@@ -863,6 +881,7 @@ function renderGrid() {
         </div>
         <div class="pane-header-row2">
           <button onclick="confirmClose('${name}')" id="close-btn-${name}" class="mgmt-btn close-btn" title="Close pane (session preserved)">Close</button>
+          <button onclick="confirmSuspend('${name}')" id="suspend-btn-${name}" class="mgmt-btn suspend-btn" title="Suspend (save session, stop)">Suspend</button>
           <button onclick="confirmStopAgent('${name}')" id="stop-btn-${name}" class="mgmt-btn stop-btn" title="Stop agent (kills session)">Stop</button>
           <button onclick="manageAgent('${name}','restart')" id="restart-btn-${name}" class="mgmt-btn restart-btn" title="Restart agent">Restart</button>
           <span class="sep">|</span>
@@ -1225,11 +1244,78 @@ async function manageAgent(name, action) {
   if (btn) { btn.textContent = action.charAt(0).toUpperCase() + action.slice(1); btn.classList.remove('running'); }
 
   // Wait a moment for processes to settle, then refresh
-  const delay = action === 'start' ? 3000 : action === 'kill' ? 3000 : 2000;
+  const removesPane = ['stop', 'kill', 'suspend'].includes(action);
+  const delay = action === 'start' ? 3000 : removesPane ? 5000 : 2000;
   setTimeout(async () => {
     await loadAgents();
-    if (action !== 'stop' && action !== 'kill') refreshPane(name);
+    if (!removesPane) refreshPane(name);
   }, delay);
+}
+
+function confirmSuspend(name) {
+  if (fullscreenAgent === name) toggleFullscreen(name);
+  if (paneStates[name] && paneStates[name].refreshTimer) {
+    clearInterval(paneStates[name].refreshTimer);
+    paneStates[name].refreshTimer = null;
+  }
+  manageAgent(name, 'suspend');
+}
+
+// --- Resume agent modal ---
+async function openResumeModal() {
+  const overlay = document.getElementById('resume-overlay');
+  const list = document.getElementById('resume-agent-list');
+  overlay.classList.add('visible');
+  list.innerHTML = '<div class="no-agents">Loading...</div>';
+
+  try {
+    const resp = await fetch('/api/suspended-agents?device_id=' + deviceId);
+    const data = await resp.json();
+    const suspended = data.agents || [];
+
+    if (suspended.length === 0) {
+      list.innerHTML = '<div class="no-agents">No suspended agents.</div>';
+      return;
+    }
+
+    list.innerHTML = suspended.map(a => `
+      <div class="agent-item">
+        <div class="agent-info">
+          <div class="agent-item-name">${escapeHtml(a.name)}</div>
+          <div class="agent-item-desc">${escapeHtml(a.description || '')} (${a.current_backend || 'claude'})</div>
+        </div>
+        <button class="agent-item-btn" id="resume-btn-${a.name}" onclick="resumeAgent('${a.name}')">Resume</button>
+      </div>
+    `).join('');
+  } catch(e) {
+    list.innerHTML = '<div class="no-agents">Error loading agents.</div>';
+  }
+}
+
+function closeResumeModal() {
+  document.getElementById('resume-overlay').classList.remove('visible');
+}
+
+async function resumeAgent(name) {
+  const btn = document.getElementById('resume-btn-' + name);
+  if (btn) { btn.disabled = true; btn.textContent = 'Resuming...'; }
+
+  try {
+    const resp = await fetch(`/api/agents/${name}/manage`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'resume', device_id: deviceId})
+    });
+    const data = await resp.json();
+    if (data.success) {
+      if (btn) { btn.textContent = 'Resumed'; }
+      setTimeout(async () => { await loadAgents(); }, 3000);
+    } else {
+      if (btn) { btn.textContent = 'Failed'; btn.disabled = false; }
+    }
+  } catch(e) {
+    if (btn) { btn.textContent = 'Error'; btn.disabled = false; }
+  }
 }
 
 async function switchBackend(name, backend) {
@@ -1535,17 +1621,11 @@ async function startDeadAgent(name) {
 // Unified Escape handler (priority: modals > fullscreen)
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  const startAgentOverlay = document.getElementById('start-agent-overlay');
-  if (startAgentOverlay && startAgentOverlay.classList.contains('visible')) {
-    closeStartAgentModal(); return;
-  }
-  const startOverlay = document.getElementById('start-overlay');
-  if (startOverlay && startOverlay.classList.contains('visible')) {
-    closeStartModal(); return;
-  }
-  const createOverlay = document.getElementById('modal-overlay');
-  if (createOverlay && createOverlay.classList.contains('visible')) {
-    closeCreateModal(); return;
+  for (const id of ['resume-overlay', 'start-agent-overlay', 'start-overlay', 'modal-overlay']) {
+    const el = document.getElementById(id);
+    if (el && el.classList.contains('visible')) {
+      el.classList.remove('visible'); return;
+    }
   }
   if (fullscreenAgent) toggleFullscreen(fullscreenAgent);
 });
@@ -1650,6 +1730,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "web": status["web"],
                     "current_backend": a.get("current_backend", ""),
                     "backends": list(a.get("backends", {}).keys()),
+                    "suspended": a.get("suspended", False),
                 })
             self._json(200, {"agents": result})
 
@@ -1666,6 +1747,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # Get buffer (dashboard auto-pairs with agents transparently)
             result = proxy_to_agent(port, f"/buffer?device_id={device_id}")
             self._json(200, result)
+
+        elif parsed.path == "/api/suspended-agents":
+            device_id = qs.get("device_id", [""])[0]
+            if not _is_paired(device_id):
+                self._json(403, {"error": "not paired"})
+                return
+            agents = discover_agents()
+            suspended = []
+            for a in agents:
+                if a.get("suspended"):
+                    suspended.append({
+                        "name": a.get("name", ""),
+                        "description": a.get("description", ""),
+                        "current_backend": a.get("current_backend", ""),
+                    })
+            self._json(200, {"agents": suspended})
 
         elif parsed.path == "/api/dead-agents":
             device_id = qs.get("device_id", [""])[0]
@@ -1818,7 +1915,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             name = parsed.path.split("/api/agents/")[1].split("/manage")[0]
             action = body.get("action", "")
-            if action not in ("start", "stop", "restart", "kill"):
+            if action not in ("start", "stop", "restart", "kill", "suspend", "resume"):
                 self._json(400, {"error": f"Invalid action: {action}"})
                 return
             ok, output = run_kroagent_cmd(action, name)
