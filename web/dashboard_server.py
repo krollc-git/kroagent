@@ -204,8 +204,8 @@ def agent_status(name):
 
 
 def run_kroagent_cmd(action, name):
-    """Run a kroagent CLI command (start/stop/restart). Returns (success, output)."""
-    if action not in ("start", "stop", "restart"):
+    """Run a kroagent CLI command (start/stop/restart/kill). Returns (success, output)."""
+    if action not in ("start", "stop", "restart", "kill"):
         return False, f"Invalid action: {action}"
     # Validate agent name: alphanumeric, hyphens, underscores only
     if not re.match(r'^[a-zA-Z0-9_-]+$', name):
@@ -502,6 +502,7 @@ body {
 .pane-header button:hover { background: #30363d; color: #c9d1d9; }
 .pane-header .sep { color: #30363d; font-size: 10px; margin: 0 2px; }
 .pane-header .mgmt-btn { font-weight: 600; }
+.pane-header .close-btn { color: #8b949e; }
 .pane-header .stop-btn { color: #f87171; }
 .pane-header .restart-btn { color: #fbbf24; }
 .pane-header .mgmt-btn:disabled { color: #484f58; cursor: not-allowed; }
@@ -600,6 +601,10 @@ body {
   background: #238636; color: white; border: none; font-weight: 600;
 }
 #topbar .btn-new-agent:hover { background: #2ea043; }
+#topbar .btn-start-agent {
+  background: #1a7f37; color: white; border: none; font-weight: 600;
+}
+#topbar .btn-start-agent:hover { background: #2ea043; }
 #topbar .btn-reconnect-agent {
   background: #1f6feb; color: white; border: none; font-weight: 600;
 }
@@ -644,6 +649,7 @@ body {
   <span class="agent-count" id="agent-count"></span>
   <div class="controls">
     <button class="btn-new-agent" onclick="openCreateModal()">+ New Agent</button>
+    <button class="btn-start-agent" onclick="openStartAgentModal()">Start Agent</button>
     <button class="btn-reconnect-agent" onclick="openStartModal()">Reconnect Agent</button>
     <button onclick="refreshAll()">Refresh All</button>
     <button onclick="location.reload()">Reload</button>
@@ -684,6 +690,18 @@ body {
     <div class="modal-buttons">
       <button class="btn-cancel" onclick="closeCreateModal()">Cancel</button>
       <button class="btn-create" id="btn-do-create" onclick="doCreateAgent()">Create Agent</button>
+    </div>
+  </div>
+</div>
+
+<div id="start-agent-overlay" class="modal-overlay-generic" onclick="if(event.target===this)closeStartAgentModal()">
+  <div id="start-modal">
+    <h2>Start Agent</h2>
+    <div class="agent-list" id="start-agent-list2">
+      <div class="no-agents">Loading...</div>
+    </div>
+    <div class="modal-buttons">
+      <button class="btn-cancel" onclick="closeStartAgentModal()">Close</button>
     </div>
   </div>
 </div>
@@ -811,7 +829,8 @@ function renderGrid() {
         <div class="status-dot checking" id="dot-${name}"></div>
         <span class="agent-name" ondblclick="toggleFullscreen('${name}')" title="Double-click to maximize">${escapeHtml(name)}</span>
         <div class="pane-controls">
-          <button onclick="confirmClose('${name}')" id="close-btn-${name}" class="mgmt-btn stop-btn" title="Close pane (session preserved)">Close</button>
+          <button onclick="confirmClose('${name}')" id="close-btn-${name}" class="mgmt-btn close-btn" title="Close pane (session preserved)">Close</button>
+          <button onclick="confirmStopAgent('${name}')" id="stop-btn-${name}" class="mgmt-btn stop-btn" title="Stop agent (kills session)">Stop</button>
           <button onclick="manageAgent('${name}','restart')" id="restart-btn-${name}" class="mgmt-btn restart-btn" title="Restart agent">Restart</button>
           <span class="sep">|</span>
           <button onclick="sendAgentKey('${name}','Escape')" title="Escape">Esc</button>
@@ -1137,11 +1156,26 @@ async function manageAgent(name, action) {
   if (btn) { btn.textContent = action.charAt(0).toUpperCase() + action.slice(1); btn.classList.remove('running'); }
 
   // Wait a moment for processes to settle, then refresh
-  const delay = action === 'start' ? 3000 : 2000;
+  const delay = action === 'start' ? 3000 : action === 'kill' ? 3000 : 2000;
   setTimeout(async () => {
     await loadAgents();
-    if (action !== 'stop') refreshPane(name);
+    if (action !== 'stop' && action !== 'kill') refreshPane(name);
   }, delay);
+}
+
+function confirmStopAgent(name) {
+  if (!confirm(`Stop ${name}? This will kill the tmux session and Claude Code instance permanently.`)) return;
+
+  if (fullscreenAgent === name) toggleFullscreen(name);
+
+  if (paneStates[name] && paneStates[name].refreshTimer) {
+    clearInterval(paneStates[name].refreshTimer);
+    paneStates[name].refreshTimer = null;
+  }
+  // Clear cached buffer since session is being destroyed
+  if (paneStates[name]) paneStates[name].lastBuffer = '';
+
+  manageAgent(name, 'kill');
 }
 
 function confirmClose(name) {
@@ -1337,9 +1371,70 @@ async function doCreateAgent() {
   }
 }
 
-// Unified Escape handler (priority: start modal > create modal > fullscreen)
+// --- Start agent modal (fully stopped agents) ---
+async function openStartAgentModal() {
+  const overlay = document.getElementById('start-agent-overlay');
+  const list = document.getElementById('start-agent-list2');
+  overlay.classList.add('visible');
+  list.innerHTML = '<div class="no-agents">Loading...</div>';
+
+  try {
+    const resp = await fetch('/api/dead-agents?device_id=' + deviceId);
+    const data = await resp.json();
+    const dead = data.agents || [];
+
+    if (dead.length === 0) {
+      list.innerHTML = '<div class="no-agents">No stopped agents to start.</div>';
+      return;
+    }
+
+    list.innerHTML = dead.map(a => `
+      <div class="agent-item">
+        <div class="agent-info">
+          <div class="agent-item-name">${escapeHtml(a.name)}</div>
+          <div class="agent-item-desc">${escapeHtml(a.description || '')} (port ${a.port})</div>
+        </div>
+        <button class="agent-item-btn" id="start-dead-btn-${a.name}" onclick="startDeadAgent('${a.name}')">Start</button>
+      </div>
+    `).join('');
+  } catch(e) {
+    list.innerHTML = '<div class="no-agents">Error loading agents.</div>';
+  }
+}
+
+function closeStartAgentModal() {
+  document.getElementById('start-agent-overlay').classList.remove('visible');
+}
+
+async function startDeadAgent(name) {
+  const btn = document.getElementById('start-dead-btn-' + name);
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
+
+  try {
+    const resp = await fetch(`/api/agents/${name}/manage`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'start', device_id: deviceId})
+    });
+    const data = await resp.json();
+    if (data.success) {
+      if (btn) { btn.textContent = 'Started'; }
+      setTimeout(async () => { await loadAgents(); }, 3000);
+    } else {
+      if (btn) { btn.textContent = 'Failed'; btn.disabled = false; }
+    }
+  } catch(e) {
+    if (btn) { btn.textContent = 'Error'; btn.disabled = false; }
+  }
+}
+
+// Unified Escape handler (priority: modals > fullscreen)
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
+  const startAgentOverlay = document.getElementById('start-agent-overlay');
+  if (startAgentOverlay && startAgentOverlay.classList.contains('visible')) {
+    closeStartAgentModal(); return;
+  }
   const startOverlay = document.getElementById('start-overlay');
   if (startOverlay && startOverlay.classList.contains('visible')) {
     closeStartModal(); return;
@@ -1466,6 +1561,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             result = proxy_to_agent(port, f"/buffer?device_id={device_id}")
             self._json(200, result)
 
+        elif parsed.path == "/api/dead-agents":
+            device_id = qs.get("device_id", [""])[0]
+            if not _is_paired(device_id):
+                self._json(403, {"error": "not paired"})
+                return
+            agents = discover_agents()
+            dead = []
+            for a in agents:
+                name = a.get("name", "")
+                if not name:
+                    continue
+                status = agent_status(name)
+                if not status["tmux"] and not status["web"]:
+                    dead.append({
+                        "name": name,
+                        "description": a.get("description", ""),
+                        "port": a.get("port", 0),
+                    })
+            self._json(200, {"agents": dead})
+
         elif parsed.path == "/api/stopped-agents":
             device_id = qs.get("device_id", [""])[0]
             if not _is_paired(device_id):
@@ -1478,7 +1593,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not name:
                     continue
                 status = agent_status(name)
-                if not status["web"]:
+                if status["tmux"] and not status["web"]:
                     stopped.append({
                         "name": name,
                         "description": a.get("description", ""),
@@ -1580,7 +1695,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             name = parsed.path.split("/api/agents/")[1].split("/manage")[0]
             action = body.get("action", "")
-            if action not in ("start", "stop", "restart"):
+            if action not in ("start", "stop", "restart", "kill"):
                 self._json(400, {"error": f"Invalid action: {action}"})
                 return
             ok, output = run_kroagent_cmd(action, name)
