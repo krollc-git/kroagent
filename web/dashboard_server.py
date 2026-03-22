@@ -1131,10 +1131,15 @@ async function manageAgent(name, action) {
   if (btn) { btn.textContent = action.charAt(0).toUpperCase() + action.slice(1); btn.classList.remove('running'); }
 
   // Wait a moment for processes to settle, then refresh
+  const delay = action === 'start' ? 3000 : action === 'kill' ? 3000 : 1000;
   setTimeout(async () => {
     await loadAgents();
     if (action !== 'kill') refreshPane(name);
-  }, action === 'start' ? 3000 : 1000);
+    // For kill, do a second check in case tmux was slow to die
+    if (action === 'kill') {
+      setTimeout(() => loadAgents(), 3000);
+    }
+  }, delay);
 }
 
 function confirmStop(name) {
@@ -1142,6 +1147,12 @@ function confirmStop(name) {
 
   // Exit fullscreen if this pane is maximized
   if (fullscreenAgent === name) toggleFullscreen(name);
+
+  // Stop auto-refresh for this pane immediately
+  if (paneStates[name] && paneStates[name].refreshTimer) {
+    clearInterval(paneStates[name].refreshTimer);
+    paneStates[name].refreshTimer = null;
+  }
 
   manageAgent(name, 'kill');
 }
