@@ -600,10 +600,10 @@ body {
   background: #238636; color: white; border: none; font-weight: 600;
 }
 #topbar .btn-new-agent:hover { background: #2ea043; }
-#topbar .btn-start-agent {
+#topbar .btn-reconnect-agent {
   background: #1f6feb; color: white; border: none; font-weight: 600;
 }
-#topbar .btn-start-agent:hover { background: #388bfd; }
+#topbar .btn-reconnect-agent:hover { background: #388bfd; }
 
 /* Start agent modal */
 #start-modal {
@@ -644,7 +644,7 @@ body {
   <span class="agent-count" id="agent-count"></span>
   <div class="controls">
     <button class="btn-new-agent" onclick="openCreateModal()">+ New Agent</button>
-    <button class="btn-start-agent" onclick="openStartModal()">Start Agent</button>
+    <button class="btn-reconnect-agent" onclick="openStartModal()">Reconnect Agent</button>
     <button onclick="refreshAll()">Refresh All</button>
     <button onclick="location.reload()">Reload</button>
   </div>
@@ -690,7 +690,7 @@ body {
 
 <div id="start-overlay" class="modal-overlay-generic" onclick="if(event.target===this)closeStartModal()">
   <div id="start-modal">
-    <h2>Start Agent</h2>
+    <h2>Reconnect Agent</h2>
     <div class="agent-list" id="start-agent-list">
       <div class="no-agents">Loading...</div>
     </div>
@@ -811,7 +811,7 @@ function renderGrid() {
         <div class="status-dot checking" id="dot-${name}"></div>
         <span class="agent-name" ondblclick="toggleFullscreen('${name}')" title="Double-click to maximize">${escapeHtml(name)}</span>
         <div class="pane-controls">
-          <button onclick="confirmStop('${name}')" id="stop-btn-${name}" class="mgmt-btn stop-btn" title="Stop agent web server (session preserved)">Stop</button>
+          <button onclick="confirmClose('${name}')" id="close-btn-${name}" class="mgmt-btn stop-btn" title="Close pane (session preserved)">Close</button>
           <button onclick="manageAgent('${name}','restart')" id="restart-btn-${name}" class="mgmt-btn restart-btn" title="Restart agent">Restart</button>
           <span class="sep">|</span>
           <button onclick="sendAgentKey('${name}','Escape')" title="Escape">Esc</button>
@@ -1144,7 +1144,7 @@ async function manageAgent(name, action) {
   }, delay);
 }
 
-function confirmStop(name) {
+function confirmClose(name) {
   // Exit fullscreen if this pane is maximized
   if (fullscreenAgent === name) toggleFullscreen(name);
 
@@ -1170,7 +1170,7 @@ async function openStartModal() {
     const stopped = data.agents || [];
 
     if (stopped.length === 0) {
-      list.innerHTML = '<div class="no-agents">All agents are already running.</div>';
+      list.innerHTML = '<div class="no-agents">All agents are already connected.</div>';
       return;
     }
 
@@ -1180,7 +1180,7 @@ async function openStartModal() {
           <div class="agent-item-name">${escapeHtml(a.name)}</div>
           <div class="agent-item-desc">${escapeHtml(a.description || '')} (port ${a.port})</div>
         </div>
-        <button class="agent-item-btn" id="start-agent-btn-${a.name}" onclick="startAgentFromModal('${a.name}')">Start</button>
+        <button class="agent-item-btn" id="reconnect-btn-${a.name}" onclick="reconnectAgentFromModal('${a.name}')">Reconnect</button>
       </div>
     `).join('');
   } catch(e) {
@@ -1192,9 +1192,9 @@ function closeStartModal() {
   document.getElementById('start-overlay').classList.remove('visible');
 }
 
-async function startAgentFromModal(name) {
-  const btn = document.getElementById('start-agent-btn-' + name);
-  if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
+async function reconnectAgentFromModal(name) {
+  const btn = document.getElementById('reconnect-btn-' + name);
+  if (btn) { btn.disabled = true; btn.textContent = 'Reconnecting...'; }
 
   try {
     const resp = await fetch(`/api/agents/${name}/manage`, {
@@ -1204,14 +1204,13 @@ async function startAgentFromModal(name) {
     });
     const data = await resp.json();
     if (data.success) {
-      if (btn) { btn.textContent = 'Started'; }
-      // Reload agents after a delay so the new pane appears
+      if (btn) { btn.textContent = 'Connected'; }
       setTimeout(async () => {
         await loadAgents();
       }, 3000);
     } else {
       if (btn) { btn.textContent = 'Failed'; btn.disabled = false; }
-      console.error(`Start ${name} failed:`, data.output);
+      console.error(`Reconnect ${name} failed:`, data.output);
     }
   } catch(e) {
     if (btn) { btn.textContent = 'Error'; btn.disabled = false; }
