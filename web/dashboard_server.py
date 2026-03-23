@@ -236,9 +236,12 @@ NGINX_CONFIG = "/etc/nginx/sites-enabled/kroclaw"
 DNS_ZONE_FILE = "/etc/bind/zones/db.morrison.internal"
 
 
-def next_available_port():
-    """Find the next available port by scanning agent configs."""
-    used_ports = set()
+RESERVED_PORTS = {18900}  # Dashboard
+
+
+def get_used_ports():
+    """Get all ports in use by agents and reserved services."""
+    used = set(RESERVED_PORTS)
     for d in KROAGENTS_DIR.iterdir():
         config_file = d / "agent.json"
         if config_file.is_file():
@@ -246,10 +249,15 @@ def next_available_port():
                 config = json.loads(config_file.read_text())
                 p = config.get("port", 0)
                 if p:
-                    used_ports.add(p)
+                    used.add(p)
             except (json.JSONDecodeError, OSError):
                 pass
-    # Start at 18880, increment by 10
+    return used
+
+
+def next_available_port():
+    """Find the next available port by scanning agent configs."""
+    used_ports = get_used_ports()
     port = 18880
     while port in used_ports:
         port += 10
@@ -265,6 +273,8 @@ def create_agent(name, description, port, workdir, initial_backend="claude"):
         return [{"step": "validate", "ok": False, "msg": "Name must start with a letter and contain only letters, numbers, hyphens, underscores"}]
     if (KROAGENTS_DIR / name / "agent.json").exists():
         return [{"step": "validate", "ok": False, "msg": f"Agent '{name}' already exists"}]
+    if port in get_used_ports():
+        return [{"step": "validate", "ok": False, "msg": f"Port {port} is already in use. Next available: {next_available_port()}"}]
 
     # Step 1: Create workspace via CLI
     try:
