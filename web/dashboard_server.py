@@ -833,11 +833,21 @@ async function loadAgents() {
     }
     const allAgents = data.agents || [];
     const newAgents = allAgents.filter(a => a.web);
-    const newNames = newAgents.map(a => a.name).join(',');
-    const oldNames = agents.map(a => a.name).join(',');
+    // Apply saved pane order from localStorage
+    const savedOrder = JSON.parse(localStorage.getItem('kroagent-pane-order') || '[]');
+    if (savedOrder.length) {
+      newAgents.sort((a, b) => {
+        const ia = savedOrder.indexOf(a.name);
+        const ib = savedOrder.indexOf(b.name);
+        // Unknown agents go to the end
+        return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+      });
+    }
+    const newNamesSet = newAgents.map(a => a.name).sort().join(',');
+    const oldNamesSet = agents.map(a => a.name).sort().join(',');
     agents = newAgents;
     document.getElementById('agent-count').textContent = agents.length + ' agent' + (agents.length !== 1 ? 's' : '');
-    if (newNames !== oldNames) {
+    if (newNamesSet !== oldNamesSet) {
       renderGrid();
     }
     refreshAll();
@@ -1243,8 +1253,9 @@ function swapPanes(nameA, nameB) {
   const idxA = agents.findIndex(a => a.name === nameA);
   const idxB = agents.findIndex(a => a.name === nameB);
   if (idxA === -1 || idxB === -1) return;
-  // Swap in agents array
   [agents[idxA], agents[idxB]] = [agents[idxB], agents[idxA]];
+  // Persist order
+  localStorage.setItem('kroagent-pane-order', JSON.stringify(agents.map(a => a.name)));
   renderGrid();
 }
 
