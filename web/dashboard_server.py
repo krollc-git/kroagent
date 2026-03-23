@@ -205,7 +205,7 @@ def agent_status(name):
 
 def run_kroagent_cmd(action, name, extra_args=None):
     """Run a kroagent CLI command. Returns (success, output)."""
-    if action not in ("start", "stop", "restart", "kill", "switch", "suspend", "resume"):
+    if action not in ("start", "stop", "restart", "kill", "switch", "suspend", "resume", "delete"):
         return False, f"Invalid action: {action}"
     # Validate agent name: alphanumeric, hyphens, underscores only
     if not re.match(r'^[a-zA-Z0-9_-]+$', name):
@@ -216,7 +216,7 @@ def run_kroagent_cmd(action, name, extra_args=None):
     cmd = [KROAGENT_CLI, action, name]
     if extra_args:
         cmd.extend(extra_args)
-    timeout = 60 if action in ("switch", "suspend") else 30
+    timeout = 60 if action in ("switch", "suspend", "delete") else 30
     try:
         result = subprocess.run(
             cmd,
@@ -632,6 +632,10 @@ body {
   background: #238636; color: white; border: none; font-weight: 600;
 }
 #topbar .btn-new-agent:hover { background: #2ea043; }
+#topbar .btn-delete-agent {
+  background: #6e1b1b; color: #f87171; border: none; font-weight: 600;
+}
+#topbar .btn-delete-agent:hover { background: #8b2525; }
 #topbar .btn-resume-agent {
   background: #7c3aed; color: white; border: none; font-weight: 600;
 }
@@ -693,6 +697,7 @@ body {
     <button class="btn-start-agent" onclick="openStartAgentModal()">Start Agent</button>
     <button class="btn-reconnect-agent" onclick="openStartModal()">Reconnect Agent</button>
     <button class="btn-resume-agent" onclick="openResumeModal()">Resume Agent</button>
+    <button class="btn-delete-agent" onclick="openDeleteModal()">Delete Agent</button>
     <button onclick="refreshAll()">Refresh All</button>
     <button onclick="location.reload()">Reload</button>
   </div>
@@ -738,6 +743,18 @@ body {
     <div class="modal-buttons">
       <button class="btn-cancel" onclick="closeCreateModal()">Cancel</button>
       <button class="btn-create" id="btn-do-create" onclick="doCreateAgent()">Create Agent</button>
+    </div>
+  </div>
+</div>
+
+<div id="delete-overlay" class="modal-overlay-generic" onclick="if(event.target===this)closeDeleteModal()">
+  <div id="start-modal">
+    <h2>Delete Agent</h2>
+    <div class="agent-list" id="delete-agent-list">
+      <div class="no-agents">Loading...</div>
+    </div>
+    <div class="modal-buttons">
+      <button class="btn-cancel" onclick="closeDeleteModal()">Close</button>
     </div>
   </div>
 </div>
@@ -1399,6 +1416,70 @@ async function resumeAgent(name) {
   }
 }
 
+// --- Delete agent modal ---
+async function openDeleteModal() {
+  const overlay = document.getElementById('delete-overlay');
+  const list = document.getElementById('delete-agent-list');
+  overlay.classList.add('visible');
+  list.innerHTML = '<div class="no-agents">Loading...</div>';
+
+  try {
+    const resp = await fetch('/api/deletable-agents?device_id=' + deviceId);
+    const data = await resp.json();
+    const deletable = data.agents || [];
+
+    if (deletable.length === 0) {
+      list.innerHTML = '<div class="no-agents">No agents available to delete. Agents must be fully stopped first.</div>';
+      return;
+    }
+
+    list.innerHTML = deletable.map(a => `
+      <div class="agent-item">
+        <div class="agent-info">
+          <div class="agent-item-name">${escapeHtml(a.name)}</div>
+          <div class="agent-item-desc">${escapeHtml(a.description || '')}</div>
+        </div>
+        <button class="agent-item-btn" id="delete-btn-${a.name}" style="background:#6e1b1b;color:#f87171;" onclick="deleteAgent('${a.name}')">Delete</button>
+      </div>
+    `).join('');
+  } catch(e) {
+    list.innerHTML = '<div class="no-agents">Error loading agents.</div>';
+  }
+}
+
+function closeDeleteModal() {
+  document.getElementById('delete-overlay').classList.remove('visible');
+}
+
+async function deleteAgent(name) {
+  if (!confirm(`Permanently delete ${name}? This removes all data, DNS, and nginx config. This cannot be undone.`)) return;
+
+  const btn = document.getElementById('delete-btn-' + name);
+  if (btn) { btn.disabled = true; btn.textContent = 'Deleting...'; }
+
+  try {
+    const resp = await fetch(`/api/agents/${name}/delete`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({device_id: deviceId})
+    });
+    const data = await resp.json();
+    if (data.success) {
+      if (btn) { btn.textContent = 'Deleted'; }
+      // Remove from localStorage pane order
+      const order = JSON.parse(localStorage.getItem('kroagent-pane-order') || '[]');
+      const filtered = order.filter(n => n !== name);
+      localStorage.setItem('kroagent-pane-order', JSON.stringify(filtered));
+      setTimeout(async () => { await loadAgents(); }, 1000);
+    } else {
+      if (btn) { btn.textContent = 'Failed'; btn.disabled = false; }
+      console.error(`Delete ${name} failed:`, data.output);
+    }
+  } catch(e) {
+    if (btn) { btn.textContent = 'Error'; btn.disabled = false; }
+  }
+}
+
 async function switchBackend(name, backend) {
   if (!confirm(`Switch ${name} to ${backend}? This will kill the current session and start a new one.`)) {
     // Reset the select to the current value
@@ -1702,7 +1783,7 @@ async function startDeadAgent(name) {
 // Unified Escape handler (priority: modals > fullscreen)
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  for (const id of ['resume-overlay', 'start-agent-overlay', 'start-overlay', 'modal-overlay']) {
+  for (const id of ['delete-overlay', 'resume-overlay', 'start-agent-overlay', 'start-overlay', 'modal-overlay']) {
     const el = document.getElementById(id);
     if (el && el.classList.contains('visible')) {
       el.classList.remove('visible'); return;
@@ -1846,6 +1927,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     })
             self._json(200, {"agents": suspended})
 
+        elif parsed.path == "/api/deletable-agents":
+            device_id = qs.get("device_id", [""])[0]
+            if not _is_paired(device_id):
+                self._json(403, {"error": "not paired"})
+                return
+            agents = discover_agents()
+            deletable = []
+            for a in agents:
+                name = a.get("name", "")
+                if not name or name == "kroagent-dev":
+                    continue
+                if a.get("suspended"):
+                    continue
+                status = agent_status(name)
+                if not status["tmux"] and not status["web"]:
+                    deletable.append({
+                        "name": name,
+                        "description": a.get("description", ""),
+                    })
+            self._json(200, {"agents": deletable})
+
         elif parsed.path == "/api/dead-agents":
             device_id = qs.get("device_id", [""])[0]
             if not _is_paired(device_id):
@@ -1973,6 +2075,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             steps = create_agent(name, description, int(port), workdir, initial_backend)
             all_ok = all(s["ok"] for s in steps)
             self._json(200, {"success": all_ok, "steps": steps, "agent": name, "port": port})
+
+        elif parsed.path.startswith("/api/agents/") and "/delete" in parsed.path:
+            device_id = body.get("device_id", "")
+            if not _is_paired(device_id):
+                self._json(403, {"error": "not paired"})
+                return
+            name = parsed.path.split("/api/agents/")[1].split("/delete")[0]
+            ok, output = run_kroagent_cmd("delete", name, ["-y"])
+            self._json(200, {"success": ok, "output": output})
 
         elif parsed.path.startswith("/api/agents/") and "/switch" in parsed.path:
             device_id = body.get("device_id", "")
