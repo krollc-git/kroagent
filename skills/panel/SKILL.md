@@ -1,6 +1,6 @@
 ---
 name: panel
-description: Run a moderated expert panel discussion with persistent AI panelists. Supports custom roles, cross-talk, shared storage, Discord output, and reconvening with memory of past sessions.
+description: Run a moderated expert panel discussion with persistent AI panelists. Supports custom roles, cross-talk, shared storage, and reconvening with memory of past sessions.
 user_invocable: true
 ---
 
@@ -20,9 +20,8 @@ Before running a panel, have a conversation with the user to define:
 2. **Panel composition** — Ask: "Use the default panel (Skeptic, Advocate, Domain Expert, Wildcard) or define your own?"
    - If custom, ask the user to name the roles and optionally describe each one.
 3. **Rounds** — How many rounds of discussion? Default is 3. Panel can end early if consensus is reached.
-4. **Output backend** — "Post to terminal (default) or a Discord channel?" If Discord, ask which channel.
-5. **Ground rules** — Any constraints? e.g. "focus on data not opinions", "consider budget constraints"
-6. **Panel name** — Give the panel a short name for saving/reconvening (e.g. "nhl-model-review"). Suggest one, let user override.
+4. **Ground rules** — Any constraints? e.g. "focus on data not opinions", "consider budget constraints"
+5. **Panel name** — Give the panel a short name for saving/reconvening. Suggest one, let user override.
 
 Once confirmed, save the spec:
 
@@ -33,8 +32,8 @@ mkdir -p ~/kroagents/$(basename $PWD)/panels/<panel-name>
 Write `spec.json`:
 ```json
 {
-  "name": "nhl-model-review",
-  "topic": "Should we remove glicko2 from the consensus model?",
+  "name": "api-redesign",
+  "topic": "Should we migrate the REST API to GraphQL?",
   "roles": [
     {"name": "Skeptic", "prompt": "You challenge assumptions and demand evidence."},
     {"name": "Advocate", "prompt": "You argue in favor of the proposal."},
@@ -43,7 +42,6 @@ Write `spec.json`:
   ],
   "rounds": 3,
   "backend": "terminal",
-  "discord_channel_id": null,
   "ground_rules": [],
   "shared_dir": "shared/",
   "created_at": "2026-03-21",
@@ -71,7 +69,7 @@ You are a panelist in an expert discussion. You will be contacted multiple times
 {ground_rules}
 
 **Source code and reference data** are available in: {panel_dir}/shared/
-Read any files you need to inform your analysis. You have full access to the source code, Discord channel history, and backtest data in that directory.
+Read any files you need to inform your analysis. You have full access to the source code and reference data in that directory.
 
 **Your previous positions from prior sessions:**
 {contents of <role-name>-history.md}
@@ -99,15 +97,15 @@ Each round has three phases: **Responses**, **Cross-talk**, and **Consensus Chec
 ┌─ ROUND N ─────────────────────────────────────────────┐
 │                                                        │
 │  1. MODERATOR PROMPT                                   │
-│     Post round topic to Discord + SendMessage to all   │
+│     Post round topic + SendMessage to all panelists    │
 │                                                        │
 │  2. PANELIST RESPONSES                                 │
 │     Each panelist responds to moderator prompt          │
-│     Post each response to Discord as it arrives         │
+│     Post each response as it arrives                    │
 │                                                        │
 │  3. CROSS-TALK (optional)                              │
 │     Poll each panelist: "Any direct questions?"         │
-│     Route questions → get answers → post to Discord     │
+│     Route questions → get answers → post responses      │
 │     Max: 1 question + 1 follow-up per panelist          │
 │                                                        │
 │  4. CONSENSUS CHECK                                    │
@@ -127,15 +125,15 @@ Each round has three phases: **Responses**, **Cross-talk**, and **Consensus Chec
 1. Post: `[Moderator] Round {N} — {topic/focus}`
 2. For each panelist, SendMessage with the round prompt + summary of what others have said so far in this round:
    - Collect their response
-   - Post to Discord: `[{emoji} {Role Name}] {response}`
+   - Output: `[{emoji} {Role Name}] {response}`
    - Check for user input ("pause" / "stop")
 3. **Cross-talk phase:**
    - Post: `[Moderator] Cross-talk — panelists may ask each other direct questions.`
    - SendMessage to each panelist: "You've heard everyone's responses this round. Do you want to ask another panelist a specific clarifying question? Only ask if you need a clarification you don't think will come out in normal discussion. Reply with the question and who it's for, or 'no questions'."
    - If a panelist has a question:
-     - Post to Discord: `[{emoji} {Questioner}] @{Target}: {question}`
+     - Output: `[{emoji} {Questioner}] @{Target}: {question}`
      - SendMessage the question to the target panelist
-     - Post the target's response to Discord: `[{emoji} {Target}] {response}`
+     - Output the target's response: `[{emoji} {Target}] {response}`
      - SendMessage the response back to the questioner: "Here's their answer. One follow-up allowed if needed, or say 'satisfied'."
      - If follow-up: route it the same way. Then move on.
    - If no panelist has questions, skip cross-talk.
@@ -145,30 +143,6 @@ Each round has three phases: **Responses**, **Cross-talk**, and **Consensus Chec
    - If all agree (with minor modifications) → proceed to synthesis.
    - If disagreements remain → frame next round around the specific disagreements.
 5. Post: `[Moderator] Round {N} complete. {Summary}. {Consensus status}.`
-
-### Discord Backend
-
-If backend is "discord", post each message to the specified channel via **Discord webhook** (preferred). Store the webhook URL in `panels/<panel-name>/webhook.txt`. Webhooks are simpler and faster than the bot token API — just a POST with no auth headers needed.
-
-```bash
-curl -s -X POST "$(cat panels/<panel-name>/webhook.txt)" \
-  -H "Content-Type: application/json" \
-  -d '{"username": "Role Name", "content": "message"}'
-```
-
-The webhook `username` field controls the display name per message, so set it to the panelist's role name (e.g. "🔢 The Quant", "🦈 The Shark", "Moderator"). This makes each post appear to come from the panelist.
-
-If no webhook exists, create one via the Discord bot API and save it. Terminal output still happens simultaneously. Format:
-
-```
-[emoji Role Name] message content
-```
-
-For cross-talk, use @-mentions to show who is being addressed:
-```
-[🔢 The Quant] @The Shark: How do you account for...
-[🦈 The Shark] The line movement data shows...
-```
 
 ### User Interjection
 
@@ -274,10 +248,10 @@ Each panelist gets a history file containing every statement they made in previo
 ## Example Session
 
 ```
-User: run a panel on whether we should add a salary cap feature to the NHL model
+User: run a panel on whether we should migrate to GraphQL
 
 [You/Moderator]: Let's set up the panel. I'd suggest the topic:
-"Should the NHL prediction model incorporate salary cap data as a feature?"
+"Should we migrate the REST API to GraphQL?"
 Does that capture it, or do you want to refine?
 
 User: yeah that works
@@ -289,23 +263,23 @@ User: default is fine
 
 [You/Moderator]: 3 rounds, terminal output. Any ground rules?
 
-User: focus on whether the data is actually available and reliable
+User: focus on migration cost vs long-term benefit
 
-[You/Moderator]: Got it. Panel "nhl-salary-cap" ready.
+[You/Moderator]: Got it. Panel "api-migration" ready.
 Starting now. Spawning panelists...
 
-[Moderator] Welcome to the nhl-salary-cap panel...
+[Moderator] Welcome to the api-migration panel...
 [Moderator] Round 1 — Opening statements.
-[🤨 Skeptic] Before we add any feature, we need to ask...
-[💪 Advocate] Salary cap data could be transformative...
-[🔬 Domain Expert] The data is available from CapFriendly...
-[🃏 Wildcard] What if instead of cap numbers, we looked at...
+[🤨 Skeptic] Before we commit to a migration, we need to ask...
+[💪 Advocate] GraphQL would solve our over-fetching problems...
+[🔬 Domain Expert] The current REST API has 47 endpoints...
+[🃏 Wildcard] What if instead of a full migration, we added a GraphQL gateway...
 [Moderator] Cross-talk — panelists may ask each other direct questions.
-[🤨 Skeptic] @Domain Expert: You say the data is available, but how current is it?
-[🔬 Domain Expert] CapFriendly updates within 24 hours of transactions...
+[🤨 Skeptic] @Domain Expert: How many of those 47 endpoints are actively used?
+[🔬 Domain Expert] Based on access logs, about 30 see regular traffic...
 [🤨 Skeptic] Satisfied.
-[Moderator] Round 1 complete. Key tension: data availability vs signal strength.
-  Consensus: Not yet — Skeptic wants more evidence, others are cautiously positive.
+[Moderator] Round 1 complete. Key tension: migration cost vs incremental approach.
+  Consensus: Not yet — Skeptic wants usage data, Wildcard's gateway idea has interest.
 ...
 [Moderator] === Panel Synthesis ===
 ...

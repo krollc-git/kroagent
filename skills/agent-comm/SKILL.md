@@ -37,8 +37,8 @@ KROAGENT_SENDER=<your-name> {baseDir}/send-message.sh --back <target-agent> <mes
 
 Examples:
 ```bash
-KROAGENT_SENDER=krogambler ~/kroagents/skills/agent-comm/send-message.sh kroroku-dev "what branch are you on?"
-KROAGENT_SENDER=kroagent-dev ~/kroagents/skills/agent-comm/send-message.sh --back krogambler "FYI: deployed new CLI"
+KROAGENT_SENDER=agent-a ~/kroagents/skills/agent-comm/send-message.sh agent-b "what branch are you on?"
+KROAGENT_SENDER=agent-a ~/kroagents/skills/agent-comm/send-message.sh --back agent-b "FYI: deployed new build"
 ```
 
 ## Receiving a Message
