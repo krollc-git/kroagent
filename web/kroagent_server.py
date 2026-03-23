@@ -23,8 +23,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 PORT = int(os.environ.get("KROAGENT_PORT", "18850"))
-TMUX_SESSION = os.environ.get("KROAGENT_TMUX_SESSION", "kroagent-kroroku-dev")
-AGENT_NAME = os.environ.get("KROAGENT_NAME", "kroroku-dev")
+TMUX_SESSION = os.environ.get("KROAGENT_TMUX_SESSION", "kroagent-default")
+AGENT_NAME = os.environ.get("KROAGENT_NAME", "default")
 BUFFER_LINES = 2000
 UPLOADS_DIR = Path(os.environ.get("KROAGENT_UPLOADS_DIR", str(Path.home() / "kroagents" / AGENT_NAME / "uploads")))
 

@@ -68,7 +68,7 @@ Each session is a JSONL file at `~/kroagents/<agent>/comms/<session_id>.jsonl`:
 
 ```jsonl
 {"type": "message", "from": "kroagent-dev", "content": "what branch are you on?", "timestamp": "2026-03-22T19:30:00Z"}
-{"type": "reply", "from": "kroroku-dev", "content": "I'm on main, commit abc123", "timestamp": "2026-03-22T19:30:05Z"}
+{"type": "reply", "from": "agent-b", "content": "I'm on main, commit abc123", "timestamp": "2026-03-22T19:30:05Z"}
 ```
 
 ## Discovering Other Agents
