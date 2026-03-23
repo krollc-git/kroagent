@@ -671,7 +671,13 @@ body {
 #start-modal .btn-cancel { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
 #start-modal .btn-cancel:hover { background: #30363d; }
 
-/* Drag and drop overlay per pane */
+/* Pane drag-and-drop reorder */
+.pane.drag-source { opacity: 0.4; }
+.pane.drag-target { border-color: #58a6ff; border-style: dashed; }
+.pane-header-row1 { cursor: grab; }
+.pane-header-row1:active { cursor: grabbing; }
+
+/* Image drag and drop overlay per pane */
 .pane.dragging .pane-terminal {
   border: 2px dashed #58a6ff; background: #0d1117ee;
 }
@@ -879,7 +885,7 @@ function renderGrid() {
     pane.id = 'pane-' + name;
     pane.innerHTML = `
       <div class="pane-header">
-        <div class="pane-header-row1">
+        <div class="pane-header-row1" draggable="true" ondragstart="paneDragStart(event, '${name}')" ondragend="paneDragEnd(event)">
           <div class="status-dot checking" id="dot-${name}"></div>
           <span class="agent-name" ondblclick="toggleFullscreen('${name}')" title="Double-click to maximize">${escapeHtml(name)}</span>
           ${agent.backends && agent.backends.length > 1 ?
@@ -931,13 +937,34 @@ function renderGrid() {
     const input = pane.querySelector('textarea');
     input.addEventListener('paste', (e) => handlePanePaste(e, name));
 
-    // Drag and drop per pane
-    pane.addEventListener('dragenter', (e) => { e.preventDefault(); pane.classList.add('dragging'); });
-    pane.addEventListener('dragleave', (e) => { pane.classList.remove('dragging'); });
+    // Drag and drop: pane reorder + image upload
+    pane.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      if (dragSourceAgent) {
+        pane.classList.add('drag-target');
+      } else {
+        pane.classList.add('dragging');
+      }
+    });
+    pane.addEventListener('dragleave', (e) => {
+      pane.classList.remove('dragging');
+      pane.classList.remove('drag-target');
+    });
     pane.addEventListener('dragover', (e) => { e.preventDefault(); });
     pane.addEventListener('drop', (e) => {
       e.preventDefault();
       pane.classList.remove('dragging');
+      pane.classList.remove('drag-target');
+
+      // Pane reorder
+      if (dragSourceAgent && dragSourceAgent !== name) {
+        swapPanes(dragSourceAgent, name);
+        dragSourceAgent = null;
+        return;
+      }
+      dragSourceAgent = null;
+
+      // Image drop
       const files = e.dataTransfer?.files;
       if (files) {
         for (const file of files) {
@@ -1187,6 +1214,38 @@ function paneKeydown(e, name) {
 function autoResize(el) {
   el.style.height = 'auto';
   el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+// --- Pane drag-and-drop reorder ---
+let dragSourceAgent = null;
+
+function paneDragStart(e, name) {
+  dragSourceAgent = name;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', name);
+  // Delay adding class so the drag image captures the original look
+  setTimeout(() => {
+    const pane = document.getElementById('pane-' + name);
+    if (pane) pane.classList.add('drag-source');
+  }, 0);
+}
+
+function paneDragEnd(e) {
+  dragSourceAgent = null;
+  // Remove all drag classes
+  document.querySelectorAll('.pane').forEach(p => {
+    p.classList.remove('drag-source');
+    p.classList.remove('drag-target');
+  });
+}
+
+function swapPanes(nameA, nameB) {
+  const idxA = agents.findIndex(a => a.name === nameA);
+  const idxB = agents.findIndex(a => a.name === nameB);
+  if (idxA === -1 || idxB === -1) return;
+  // Swap in agents array
+  [agents[idxA], agents[idxB]] = [agents[idxB], agents[idxA]];
+  renderGrid();
 }
 
 // --- Fullscreen ---
