@@ -7,7 +7,8 @@ Type=forking
 Environment=KROAGENT_PORT={{PORT}}
 Environment=KROAGENT_TMUX_SESSION=kroagent-{{AGENT_NAME}}
 Environment=KROAGENT_NAME={{AGENT_NAME}}
-ExecStartPre=/bin/bash -c 'tmux has-session -t kroagent-{{AGENT_NAME}} 2>/dev/null || tmux new-session -d -s kroagent-{{AGENT_NAME}} -c {{WORKDIR}} "claude --dangerously-skip-permissions"'
+Environment=PATH=%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+ExecStartPre=/bin/bash -c 'tmux has-session -t kroagent-{{AGENT_NAME}} 2>/dev/null || tmux new-session -d -s kroagent-{{AGENT_NAME}} -c {{WORKDIR}} "%h/.npm-global/bin/claude --dangerously-skip-permissions"'
 ExecStart=/bin/bash -c 'nohup python3 {{KROAGENTS_DIR}}/web/kroagent_server.py > /tmp/kroagent-{{AGENT_NAME}}-web.log 2>&1 & echo $! > /tmp/kroagent-{{AGENT_NAME}}-web.pid'
 ExecStop=/bin/bash -c 'kill $(cat /tmp/kroagent-{{AGENT_NAME}}-web.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/kroagent-{{AGENT_NAME}}-web.pid'
 RemainAfterExit=yes

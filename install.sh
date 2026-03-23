@@ -25,6 +25,7 @@ cp "$SCRIPT_DIR/bin/kroagent" "$INSTALL_DIR/kroagent"
 chmod +x "$INSTALL_DIR/kroagent"
 
 cp "$SCRIPT_DIR/web/kroagent_server.py" "$INSTALL_DIR/web/kroagent_server.py"
+cp "$SCRIPT_DIR/web/dashboard_server.py" "$INSTALL_DIR/web/dashboard_server.py"
 
 # Copy bundled skills
 if [ -d "$SCRIPT_DIR/skills" ]; then
