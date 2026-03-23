@@ -557,7 +557,7 @@ body {
   <h2>Device Pairing Required</h2>
   <p>This browser needs to be paired with the KroAgent Dashboard.</p>
   <div class="device-id" id="pair-device-id"></div>
-  <p>Approve via CLI on kroclaw:<br>
+  <p>Approve via CLI on the server:<br>
   <code style="color:#58a6ff">curl http://127.0.0.1:DASHBOARD_PORT_PLACEHOLDER/api/approve/&lt;device-id&gt;</code></p>
   <button onclick="checkDashboardPairing()">Check Pairing</button>
   <p id="pair-status"></p>
@@ -566,7 +566,7 @@ body {
 <div id="grid" style="display:none;"></div>
 <div id="no-agents">
   <h2>No agents found</h2>
-  <p>Create agents with <code>kroagent create &lt;name&gt;</code> on kroclaw, or click <b>+ New Agent</b> above.</p>
+  <p>Create agents with <code>kroagent create &lt;name&gt;</code> on the server, or click <b>+ New Agent</b> above.</p>
 </div>
 
 <div id="modal-overlay" onclick="if(event.target===this)closeCreateModal()">
