@@ -22,10 +22,6 @@ KROAGENTS_DIR = Path(os.environ.get("KROAGENTS_DIR", str(Path.home() / "kroagent
 DATA_DIR = Path(os.environ.get("DASHBOARD_DATA_DIR", str(Path.home() / ".config" / "kroagents")))
 MAX_PANES = 6
 
-# Fixed device ID the dashboard uses when proxying to agent web servers.
-# Auto-paired with each agent on first contact so the user only pairs once (with the dashboard).
-DASHBOARD_DEVICE_ID = "kroagent-dashboard-proxy-00000000"
-
 # --- Device pairing (dashboard-level) ---
 _devices = {"paired": {}, "pending": {}}
 
@@ -97,53 +93,17 @@ def discover_agents():
 
 # --- Proxy to agent web servers ---
 
-_auto_paired_agents = set()  # ports we've already auto-paired with
-
-
-def _ensure_agent_paired(port):
-    """Auto-pair the dashboard's proxy device ID with an agent if not already done."""
-    if port in _auto_paired_agents:
-        return
-    try:
-        # Check if already paired
-        check_url = f"http://127.0.0.1:{port}/api/pair-status?device_id={DASHBOARD_DEVICE_ID}"
-        req = urllib.request.Request(check_url)
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
-            if data.get("paired"):
-                _auto_paired_agents.add(port)
-                return
-        # Request pairing
-        pair_url = f"http://127.0.0.1:{port}/api/pair"
-        pair_body = json.dumps({"device_id": DASHBOARD_DEVICE_ID, "info": "dashboard-proxy"}).encode()
-        req = urllib.request.Request(pair_url, data=pair_body, method="POST",
-                                    headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=5)
-        # Approve immediately (dashboard is trusted localhost)
-        approve_url = f"http://127.0.0.1:{port}/api/approve/{DASHBOARD_DEVICE_ID}"
-        req = urllib.request.Request(approve_url)
-        urllib.request.urlopen(req, timeout=5)
-        _auto_paired_agents.add(port)
-    except Exception:
-        pass  # Agent may be offline, that's fine
-
-
 def proxy_to_agent(port, path, method="GET", body=None):
-    """Forward a request to an agent's web server on localhost:<port>.
-
-    Always uses DASHBOARD_DEVICE_ID so agent-level pairing is transparent.
-    """
-    _ensure_agent_paired(port)
-
-    # Rewrite device_id in query strings and POST bodies to use the dashboard's proxy ID
+    """Forward a request to an agent's web server on localhost:<port>."""
+    # Strip device_id from query strings (agents no longer check)
     if "device_id=" in path:
-        # Replace any device_id in the URL with the dashboard's
-        import re
-        path = re.sub(r'device_id=[^&]*', f'device_id={DASHBOARD_DEVICE_ID}', path)
+        path = re.sub(r'[?&]device_id=[^&]*', '', path)
+        if path.endswith('?'):
+            path = path[:-1]
 
+    # Strip device_id from POST bodies
     if body is not None and "device_id" in body:
-        body = dict(body)
-        body["device_id"] = DASHBOARD_DEVICE_ID
+        body = {k: v for k, v in body.items() if k != "device_id"}
 
     url = f"http://127.0.0.1:{port}{path}"
     try:
@@ -231,11 +191,6 @@ def run_kroagent_cmd(action, name, extra_args=None):
         return False, str(e)
 
 
-DOMAIN = "morrison.internal"
-KROCLAW_IP = "192.168.1.103"
-NGINX_CONFIG = "/etc/nginx/sites-enabled/kroclaw"
-DNS_ZONE_FILE = "/etc/bind/zones/db.morrison.internal"
-
 
 RESERVED_PORTS = {18900}  # Dashboard
 
@@ -265,11 +220,11 @@ def next_available_port():
     return port
 
 
-def create_agent(name, description, port, workdir, initial_backend="claude"):
+def create_agent(name, description, port, workdir):
     """Create a new agent end-to-end. Returns list of step results."""
     steps = []
 
-    # Validate name
+    # Validate
     if not re.match(r'^[a-zA-Z][a-zA-Z0-9_-]*$', name):
         return [{"step": "validate", "ok": False, "msg": "Name must start with a letter and contain only letters, numbers, hyphens, underscores"}]
     if (KROAGENTS_DIR / name / "agent.json").exists():
@@ -279,7 +234,7 @@ def create_agent(name, description, port, workdir, initial_backend="claude"):
 
     # Step 1: Create workspace via CLI
     try:
-        env = {**os.environ, "HOME": str(Path.home()), "KROAGENT_DOMAIN": DOMAIN}
+        env = {**os.environ, "HOME": str(Path.home())}
         result = subprocess.run(
             [KROAGENT_CLI, "create", name],
             capture_output=True, text=True, timeout=15, env=env
@@ -299,118 +254,13 @@ def create_agent(name, description, port, workdir, initial_backend="claude"):
         config["port"] = port
         config["description"] = description
         config["workdir"] = workdir
-        config["domain"] = f"{name}.{DOMAIN}"
-        if initial_backend and "backends" in config and initial_backend in config["backends"]:
-            config["current_backend"] = initial_backend
         config_file.write_text(json.dumps(config, indent=2) + "\n")
-        steps.append({"step": "config", "ok": True, "msg": f"Set port={port}, backend={initial_backend}"})
+        steps.append({"step": "config", "ok": True, "msg": f"Set port={port}"})
     except Exception as e:
         steps.append({"step": "config", "ok": False, "msg": str(e)})
         return steps
 
-    # Step 3: Add DNS record on dhcprouter
-    try:
-        # Check if record already exists
-        check = subprocess.run(
-            ["ssh", "dhcprouter", f"grep -q '^{name}' {DNS_ZONE_FILE}"],
-            capture_output=True, timeout=10
-        )
-        if check.returncode == 0:
-            steps.append({"step": "dns", "ok": True, "msg": "DNS record already exists"})
-        else:
-            # Get current serial, increment it
-            get_serial = subprocess.run(
-                ["ssh", "dhcprouter", f"grep -oP '\\d{{10}}(?=\\s+; Serial)' {DNS_ZONE_FILE}"],
-                capture_output=True, text=True, timeout=10
-            )
-            old_serial = get_serial.stdout.strip()
-            today = time.strftime("%Y%m%d")
-            if old_serial.startswith(today):
-                seq = int(old_serial[-2:]) + 1
-                new_serial = f"{today}{seq:02d}"
-            else:
-                new_serial = f"{today}01"
-
-            # Add A record and update serial
-            dns_entry = f"{name}     IN      A       {KROCLAW_IP}"
-            cmd = (
-                f"sudo sed -i 's/{old_serial}/{new_serial}/' {DNS_ZONE_FILE} && "
-                f"echo '{dns_entry}' | sudo tee -a {DNS_ZONE_FILE} > /dev/null && "
-                f"sudo systemctl reload bind9"
-            )
-            result = subprocess.run(
-                ["ssh", "dhcprouter", cmd],
-                capture_output=True, text=True, timeout=15
-            )
-            ok = result.returncode == 0
-            msg = "DNS record added" if ok else (result.stdout + result.stderr).strip()
-            steps.append({"step": "dns", "ok": ok, "msg": msg})
-            if not ok:
-                return steps
-    except Exception as e:
-        steps.append({"step": "dns", "ok": False, "msg": str(e)})
-        return steps
-
-    # Step 4: Add nginx server block
-    try:
-        # Check if server block already exists
-        check = subprocess.run(
-            ["grep", "-q", f"server_name {name}.{DOMAIN}", NGINX_CONFIG],
-            capture_output=True, timeout=5
-        )
-        if check.returncode == 0:
-            steps.append({"step": "nginx", "ok": True, "msg": "Nginx block already exists"})
-        else:
-            nginx_block = f"""
-server {{
-    listen 443 ssl;
-    server_name {name}.{DOMAIN};
-    ssl_certificate /etc/openclaw/certs/kroclaw.pem;
-    ssl_certificate_key /etc/openclaw/certs/kroclaw-key.pem;
-    location / {{
-        proxy_pass http://127.0.0.1:{port};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_read_timeout 300s;
-    }}
-}}
-"""
-            # Append to nginx config
-            result = subprocess.run(
-                ["sudo", "tee", "-a", NGINX_CONFIG],
-                input=nginx_block, capture_output=True, text=True, timeout=10
-            )
-            if result.returncode != 0:
-                steps.append({"step": "nginx", "ok": False, "msg": "Failed to write nginx config"})
-                return steps
-
-            # Test config
-            test = subprocess.run(
-                ["sudo", "nginx", "-t"],
-                capture_output=True, text=True, timeout=10
-            )
-            if test.returncode != 0:
-                steps.append({"step": "nginx", "ok": False, "msg": f"Nginx test failed: {test.stderr}"})
-                return steps
-
-            # Reload
-            reload_result = subprocess.run(
-                ["sudo", "systemctl", "reload", "nginx"],
-                capture_output=True, text=True, timeout=10
-            )
-            ok = reload_result.returncode == 0
-            msg = "Nginx configured and reloaded" if ok else reload_result.stderr.strip()
-            steps.append({"step": "nginx", "ok": ok, "msg": msg})
-            if not ok:
-                return steps
-    except Exception as e:
-        steps.append({"step": "nginx", "ok": False, "msg": str(e)})
-        return steps
-
-    # Step 5: Start the agent
+    # Step 3: Start the agent
     try:
         ok, output = run_kroagent_cmd("start", name)
         steps.append({"step": "start", "ok": ok, "msg": output})
@@ -733,12 +583,6 @@ body {
     <label for="ca-workdir">Working Directory</label>
     <input id="ca-workdir" placeholder="auto (~/kroagents/name)">
     <div class="hint">Leave blank for default.</div>
-    <label for="ca-backend">Start With</label>
-    <select id="ca-backend" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:8px 10px;border-radius:6px;font-family:inherit;font-size:13px;">
-      <option value="claude">Claude (claude --dangerously-skip-permissions)</option>
-      <option value="codex">Codex (codex --full-auto)</option>
-    </select>
-    <div class="hint">Both backends will be available. You can switch later.</div>
     <div id="create-steps"></div>
     <div class="modal-buttons">
       <button class="btn-cancel" onclick="closeCreateModal()">Cancel</button>
@@ -916,11 +760,6 @@ function renderGrid() {
         <div class="pane-header-row1" draggable="true" ondragstart="paneDragStart(event, '${name}')" ondragend="paneDragEnd(event)">
           <div class="status-dot checking" id="dot-${name}"></div>
           <span class="agent-name" ondblclick="toggleFullscreen('${name}')" title="Double-click to maximize">${escapeHtml(name)}</span>
-          ${agent.backends && agent.backends.length > 1 ?
-            `<select class="backend-select" id="backend-${name}" onchange="switchBackend('${name}', this.value)">
-              ${agent.backends.map(b => `<option value="${b}" ${b === agent.current_backend ? 'selected' : ''}>${b}</option>`).join('')}
-            </select>` :
-            (agent.current_backend ? `<span class="backend-label">${escapeHtml(agent.current_backend)}</span>` : '')}
           <button onclick="toggleFullscreen('${name}')" id="max-btn-${name}" class="max-btn max-btn-top" title="Maximize/minimize">&#x26F6;</button>
         </div>
         <div class="pane-header-row2">
@@ -1606,11 +1445,9 @@ const STEP_LABELS = {
   validate: 'Validate',
   create: 'Create workspace',
   config: 'Configure agent',
-  dns: 'Add DNS record',
-  nginx: 'Configure nginx',
   start: 'Start agent'
 };
-const ALL_STEPS = ['create', 'config', 'dns', 'nginx', 'start'];
+const ALL_STEPS = ['create', 'config', 'start'];
 
 async function openCreateModal() {
   document.getElementById('modal-overlay').classList.add('visible');
@@ -1647,7 +1484,6 @@ async function doCreateAgent() {
   const desc = document.getElementById('ca-desc').value.trim();
   const port = document.getElementById('ca-port').value.trim();
   const workdir = document.getElementById('ca-workdir').value.trim();
-  const backend = document.getElementById('ca-backend').value;
 
   if (!name) { document.getElementById('ca-name').focus(); return; }
 
@@ -1671,7 +1507,6 @@ async function doCreateAgent() {
         description: desc,
         port: port ? parseInt(port) : 0,
         workdir: workdir,
-        backend: backend,
         device_id: deviceId
       })
     });
@@ -2071,8 +1906,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 port = next_available_port()
             if not workdir:
                 workdir = str(KROAGENTS_DIR / name)
-            initial_backend = body.get("backend", "claude")
-            steps = create_agent(name, description, int(port), workdir, initial_backend)
+            steps = create_agent(name, description, int(port), workdir)
             all_ok = all(s["ok"] for s in steps)
             self._json(200, {"success": all_ok, "steps": steps, "agent": name, "port": port})
 

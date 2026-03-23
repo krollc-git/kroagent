@@ -335,15 +335,8 @@ cmd_create() {
   "type": "claude-code",
   "description": "$name KroAgent",
   "port": 0,
-  "domain": "${name}.${KROAGENT_DOMAIN:-localhost}",
-  "backend": "tmux",
   "tmux_session": "kroagent-${name}",
-  "workdir": "$dir",
-  "backends": {
-    "claude": "claude --dangerously-skip-permissions",
-    "codex": "codex --full-auto"
-  },
-  "current_backend": "claude"
+  "workdir": "$dir"
 }
 EOF
 
@@ -575,7 +568,6 @@ cmd_delete() {
 
     local tmux_session=$(get_config "$name" "tmux_session")
     local port=$(get_config "$name" "port")
-    local domain=$(get_config "$name" "domain")
 
     # Refuse if running
     if tmux has-session -t "$tmux_session" 2>/dev/null; then
@@ -591,43 +583,12 @@ cmd_delete() {
     if [ "$force" != "-y" ]; then
         echo "This will permanently delete agent '$name' and all its data:"
         echo "  - Directory: $KROAGENTS_DIR/$name/"
-        echo "  - DNS record: $domain"
-        echo "  - Nginx server block"
-        echo "  - Pairing data"
         echo ""
         read -p "Delete $name? (y/N) " confirm
         [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || { echo "Cancelled."; exit 0; }
     fi
 
     echo "Deleting $name..."
-
-    # Remove DNS record
-    if [ -n "$domain" ]; then
-        local dns_name="${domain%%.*}"
-        ssh dhcprouter "sudo sed -i '/^${dns_name}[[:space:]]/d' /etc/bind/zones/db.morrison.internal" 2>/dev/null && \
-        ssh dhcprouter "sudo systemctl reload bind9" 2>/dev/null && \
-        echo "  DNS record removed" || echo "  DNS removal failed (may need manual cleanup)"
-    fi
-
-    # Remove nginx server block
-    if grep -q "server_name ${domain}" /etc/nginx/sites-enabled/kroclaw 2>/dev/null; then
-        # Remove the server block (from 'server {' to next '}')
-        sudo python3 -c "
-import re
-with open('/etc/nginx/sites-enabled/kroclaw') as f:
-    content = f.read()
-# Match the server block containing this domain
-pattern = r'\nserver\s*\{[^}]*server_name\s+${domain};[^}]*\}\n'
-content = re.sub(pattern, '\n', content)
-with open('/etc/nginx/sites-enabled/kroclaw', 'w') as f:
-    f.write(content)
-" && sudo nginx -t 2>/dev/null && sudo systemctl reload nginx 2>/dev/null && \
-        echo "  Nginx block removed" || echo "  Nginx removal failed (may need manual cleanup)"
-    fi
-
-    # Remove pairing data
-    rm -f "$HOME/.config/kroagents/paired_devices_${name}.json" 2>/dev/null
-    echo "  Pairing data removed"
 
     # Remove agent directory
     rm -rf "$KROAGENTS_DIR/$name"
