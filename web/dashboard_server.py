@@ -216,10 +216,11 @@ def run_kroagent_cmd(action, name, extra_args=None):
     cmd = [KROAGENT_CLI, action, name]
     if extra_args:
         cmd.extend(extra_args)
+    timeout = 60 if action in ("switch", "suspend") else 30
     try:
         result = subprocess.run(
             cmd,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=timeout,
             env={**os.environ, "HOME": str(Path.home())}
         )
         output = (result.stdout + result.stderr).strip()
@@ -1811,6 +1812,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "current_backend": a.get("current_backend", ""),
                     "backends": list(a.get("backends", {}).keys()),
                     "suspended": a.get("suspended", False),
+                    "backend_states": a.get("backend_states", {}),
                 })
             self._json(200, {"agents": result})
 

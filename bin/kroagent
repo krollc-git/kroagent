@@ -51,26 +51,78 @@ else:
 }
 
 get_resume_command() {
-    # Get the launch command with resume flags appended.
+    # Get the launch command with resume flags if backend was suspended.
     local name="$1"
     python3 -c "
 import json
 d = json.load(open('$KROAGENTS_DIR/$name/agent.json'))
 backends = d.get('backends', {})
 current = d.get('current_backend', '')
+states = d.get('backend_states', {})
 if backends and current and current in backends:
     cmd = backends[current]
 else:
     cmd = 'claude --dangerously-skip-permissions'
-# Append resume flag based on backend
-binary = cmd.split()[0]
-if binary == 'claude':
-    print(cmd + ' --continue')
-elif binary == 'codex':
-    print('codex resume --last')
-else:
-    print(cmd)
+# Only append resume flag if this backend was suspended
+if states.get(current) == 'suspended':
+    binary = cmd.split()[0]
+    if binary == 'claude':
+        cmd += ' --continue'
+    elif binary == 'codex':
+        cmd = 'codex resume --last'
+print(cmd)
 "
+}
+
+get_backend_state() {
+    # Get the state of a specific backend for an agent
+    local name="$1"
+    local backend="$2"
+    python3 -c "
+import json
+d = json.load(open('$KROAGENTS_DIR/$name/agent.json'))
+states = d.get('backend_states', {})
+print(states.get('$backend', 'stopped'))
+"
+}
+
+set_backend_state() {
+    # Set the state of a specific backend
+    local name="$1"
+    local backend="$2"
+    local state="$3"
+    python3 -c "
+import json
+f = '$KROAGENTS_DIR/$name/agent.json'
+d = json.load(open(f))
+states = d.setdefault('backend_states', {})
+states['$backend'] = '$state'
+open(f, 'w').write(json.dumps(d, indent=2) + '\n')
+"
+}
+
+clear_all_backend_states() {
+    # Set all backend states to stopped
+    local name="$1"
+    python3 -c "
+import json
+f = '$KROAGENTS_DIR/$name/agent.json'
+d = json.load(open(f))
+d['backend_states'] = {k: 'stopped' for k in d.get('backends', {})}
+open(f, 'w').write(json.dumps(d, indent=2) + '\n')
+"
+}
+
+graceful_exit_tmux() {
+    # Gracefully exit the CLI running in tmux (Escape + /exit)
+    local tmux_session="$1"
+    if tmux has-session -t "$tmux_session" 2>/dev/null; then
+        tmux send-keys -t "$tmux_session" Escape
+        sleep 1
+        tmux send-keys -t "$tmux_session" "/exit" Enter
+        sleep 3
+        tmux kill-session -t "$tmux_session" 2>/dev/null || true
+    fi
 }
 
 set_config() {
@@ -485,7 +537,10 @@ cmd_kill() {
         kill_web_server "$port"
         # Kill tmux session
         tmux kill-session -t "$tmux_session" 2>/dev/null || true
-        echo "Killed $name (web server + tmux session)"
+        # Clear all backend states and suspended flag
+        clear_all_backend_states "$name"
+        set_config "$name" "suspended" "false"
+        echo "Killed $name (web server + tmux session, all sessions cleared)"
     elif [ "$type" = "local-llm" ]; then
         local service=$(get_config "$name" "systemd_service")
         if [ -n "$service" ]; then
@@ -536,21 +591,20 @@ cmd_suspend() {
     local tmux_session=$(get_config "$name" "tmux_session")
     local port=$(get_config "$name" "port")
 
+    local current_backend=$(get_config "$name" "current_backend")
+
     echo "Suspending $name..."
 
-    # Gracefully exit Claude Code if tmux is running
-    if tmux has-session -t "$tmux_session" 2>/dev/null; then
-        tmux send-keys -t "$tmux_session" Escape
-        sleep 1
-        tmux send-keys -t "$tmux_session" "/exit" Enter
-        sleep 3
-        tmux kill-session -t "$tmux_session" 2>/dev/null || true
-    fi
+    # Gracefully exit if tmux is running
+    graceful_exit_tmux "$tmux_session"
 
     # Kill web server
     kill_web_server "$port"
 
-    # Mark as suspended (always set, even if tmux was already gone)
+    # Mark current backend as suspended
+    if [ -n "$current_backend" ]; then
+        set_backend_state "$name" "$current_backend" "suspended"
+    fi
     set_config "$name" "suspended" "true"
 
     echo "Suspended $name (session saved, use 'kroagent resume $name' to continue)"
@@ -601,7 +655,11 @@ cmd_resume() {
         echo "Web server already running"
     fi
 
-    # Clear suspended flag
+    # Update state
+    local current_backend=$(get_config "$name" "current_backend")
+    if [ -n "$current_backend" ]; then
+        set_backend_state "$name" "$current_backend" "running"
+    fi
     set_config "$name" "suspended" "false"
 
     echo "Resumed $name"
@@ -612,6 +670,14 @@ cmd_switch() {
     local backend="$2"
     [ -z "$name" ] || [ -z "$backend" ] && { echo "Usage: kroagent switch <name> <backend>"; exit 1; }
     agent_exists "$name" || { echo "Agent '$name' not found"; exit 1; }
+
+    local current_backend=$(get_config "$name" "current_backend")
+
+    # No-op if already on this backend
+    if [ "$current_backend" = "$backend" ]; then
+        echo "Agent '$name' is already on backend '$backend'"
+        return
+    fi
 
     # Verify backend exists in config
     local valid
@@ -629,27 +695,56 @@ else:
         exit 1
     fi
 
-    # Update current_backend in agent.json
-    python3 -c "
-import json
-f = '$KROAGENTS_DIR/$name/agent.json'
-d = json.load(open(f))
-d['current_backend'] = '$backend'
-open(f, 'w').write(json.dumps(d, indent=2) + '\n')
-"
-    echo "Switched $name to backend: $backend"
-
-    # Kill existing tmux session and restart
     local tmux_session=$(get_config "$name" "tmux_session")
-    local port=$(get_config "$name" "port")
+
+    # Gracefully suspend the current backend (save conversation)
     if tmux has-session -t "$tmux_session" 2>/dev/null; then
-        echo "Killing existing session..."
-        tmux kill-session -t "$tmux_session" 2>/dev/null || true
-        sleep 2
+        echo "Suspending $current_backend session..."
+        graceful_exit_tmux "$tmux_session"
+        set_backend_state "$name" "$current_backend" "suspended"
     fi
 
-    # Restart
-    cmd_start "$name"
+    # Switch to new backend
+    set_config "$name" "current_backend" "$backend"
+
+    # Check if new backend has a suspended session to resume
+    local new_state=$(get_backend_state "$name" "$backend")
+    echo "Switching $name to $backend (previous state: $new_state)..."
+
+    # Start the new backend (get_resume_command checks backend_states for resume flag)
+    local launch_cmd
+    if [ "$new_state" = "suspended" ]; then
+        launch_cmd=$(get_resume_command "$name")
+    else
+        launch_cmd=$(get_launch_command "$name")
+    fi
+    [ -z "$launch_cmd" ] && { echo "ERROR: No launch command for $backend"; exit 1; }
+
+    local cmd_binary="${launch_cmd%% *}"
+    local cmd_args="${launch_cmd#* }"
+    [ "$cmd_args" = "$launch_cmd" ] && cmd_args=""
+    local resolved_bin
+    resolved_bin=$(resolve_binary "$cmd_binary")
+    [ -z "$resolved_bin" ] && { echo "ERROR: $cmd_binary not found"; exit 1; }
+    local full_cmd="$resolved_bin${cmd_args:+ $cmd_args}"
+    local workdir=$(get_config "$name" "workdir")
+
+    tmux new-session -d -s "$tmux_session" -c "$workdir" "$full_cmd"
+    sleep 3
+
+    set_backend_state "$name" "$backend" "running"
+
+    # Start web server if not running
+    local port=$(get_config "$name" "port")
+    if ! lsof -ti ":$port" >/dev/null 2>&1; then
+        KROAGENT_PORT=$port \
+        KROAGENT_TMUX_SESSION=$tmux_session \
+        KROAGENT_NAME=$name \
+        nohup python3 "$KROAGENTS_DIR/web/kroagent_server.py" \
+            > "/tmp/kroagent-${name}-web.log" 2>&1 &
+    fi
+
+    echo "Switched $name to $backend"
 }
 
 case "${1:-}" in
