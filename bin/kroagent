@@ -81,7 +81,13 @@ set_config() {
 import json
 f = '$KROAGENTS_DIR/$name/agent.json'
 d = json.load(open(f))
-d['$key'] = $value
+v = '$value'
+if v == 'true': v = True
+elif v == 'false': v = False
+else:
+    try: v = int(v)
+    except ValueError: pass
+d['$key'] = v
 open(f, 'w').write(json.dumps(d, indent=2) + '\n')
 "
 }
@@ -530,28 +536,21 @@ cmd_suspend() {
     local tmux_session=$(get_config "$name" "tmux_session")
     local port=$(get_config "$name" "port")
 
-    if ! tmux has-session -t "$tmux_session" 2>/dev/null; then
-        echo "Agent '$name' is not running"
-        exit 1
-    fi
-
     echo "Suspending $name..."
 
-    # Send Escape to interrupt any in-progress work
-    tmux send-keys -t "$tmux_session" Escape
-    sleep 1
-
-    # Send /exit to cleanly exit Claude Code
-    tmux send-keys -t "$tmux_session" "/exit" Enter
-    sleep 3
-
-    # Kill tmux session
-    tmux kill-session -t "$tmux_session" 2>/dev/null || true
+    # Gracefully exit Claude Code if tmux is running
+    if tmux has-session -t "$tmux_session" 2>/dev/null; then
+        tmux send-keys -t "$tmux_session" Escape
+        sleep 1
+        tmux send-keys -t "$tmux_session" "/exit" Enter
+        sleep 3
+        tmux kill-session -t "$tmux_session" 2>/dev/null || true
+    fi
 
     # Kill web server
     kill_web_server "$port"
 
-    # Mark as suspended
+    # Mark as suspended (always set, even if tmux was already gone)
     set_config "$name" "suspended" "true"
 
     echo "Suspended $name (session saved, use 'kroagent resume $name' to continue)"
