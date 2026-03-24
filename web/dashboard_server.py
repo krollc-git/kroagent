@@ -760,28 +760,25 @@ function renderGrid() {
         <div class="pane-header-row1" draggable="true" ondragstart="paneDragStart(event, '${name}')" ondragend="paneDragEnd(event)">
           <div class="status-dot checking" id="dot-${name}"></div>
           <span class="agent-name" ondblclick="toggleFullscreen('${name}')" title="Double-click to maximize">${escapeHtml(name)}</span>
-          <button onclick="toggleFullscreen('${name}')" id="max-btn-${name}" class="max-btn max-btn-top" title="Maximize/minimize">&#x26F6;</button>
-        </div>
-        <div class="pane-header-row2">
           <button onclick="confirmClose('${name}')" id="close-btn-${name}" class="mgmt-btn close-btn" title="Close pane (session preserved)">Close</button>
           <button onclick="confirmSuspend('${name}')" id="suspend-btn-${name}" class="mgmt-btn suspend-btn" title="Suspend (save session, stop)">Suspend</button>
           <button onclick="confirmStopAgent('${name}')" id="stop-btn-${name}" class="mgmt-btn stop-btn" title="Stop agent (kills session)">Stop</button>
           <button onclick="manageAgent('${name}','restart')" id="restart-btn-${name}" class="mgmt-btn restart-btn" title="Restart agent">Restart</button>
-          <span class="sep">|</span>
+          <button onclick="refreshPane('${name}')" title="Refresh">↻</button>
+          <button onclick="togglePaneAutoRefresh('${name}')" id="auto-btn-${name}" class="auto-btn active" title="Toggle auto-refresh">Auto: ON</button>
+          <button onclick="toggleFullscreen('${name}')" id="max-btn-${name}" class="max-btn max-btn-top" title="Maximize/minimize">&#x26F6;</button>
+        </div>
+        <div class="pane-header-row2">
           <button onclick="sendAgentKey('${name}','Escape')" title="Escape">Esc</button>
           <button onclick="sendAgentKey('${name}','C-c')" title="Ctrl+C">^C</button>
           <button onclick="sendAgentKey('${name}','Enter')" title="Enter">↵</button>
           <button onclick="sendAgentKey('${name}','Space')" title="Space">⎵</button>
           <button onclick="sendAgentKey('${name}','Up')" title="Up arrow">↑</button>
           <button onclick="sendAgentKey('${name}','Down')" title="Down arrow">↓</button>
-          <button onclick="sendAgentKey('${name}','Tab')" title="Tab">Tab</button>
           <button onclick="sendAgentKey('${name}','0')" title="0">0</button>
           <button onclick="sendAgentKey('${name}','1')" title="1">1</button>
           <button onclick="sendAgentKey('${name}','2')" title="2">2</button>
           <button onclick="sendAgentKey('${name}','3')" title="3">3</button>
-          <span class="sep">|</span>
-          <button onclick="refreshPane('${name}')" title="Refresh">↻</button>
-          <button onclick="togglePaneAutoRefresh('${name}')" id="auto-btn-${name}" class="auto-btn active" title="Toggle auto-refresh">Auto: ON</button>
         </div>
       </div>
       <div class="pane-terminal" id="term-${name}"></div>
