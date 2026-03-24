@@ -152,8 +152,29 @@ sudo update-ca-certificates
 
 <div class="step">
   <h2>Step 3: Open the Dashboard</h2>
-  <p>You're all set. Click below to open the KroAgent Dashboard:</p>
+  <p>Open the dashboard in your browser. It will show a pairing screen with your device ID.</p>
   <a class="dashboard-link" href="DASHBOARD_URL">Open Dashboard &rarr;</a>
+</div>
+
+<div class="step">
+  <h2>Step 4: Approve Your Device</h2>
+  <p>After opening the dashboard, you'll see a "Device Pairing Required" screen. SSH into the server and run:</p>
+  <div class="code-block">
+    # List pending devices
+kroagent approve dashboard
+# Approve by device ID prefix (first 8 chars shown on the pairing screen)
+kroagent approve dashboard &lt;device-id&gt;
+    <button class="copy-btn" onclick="copyText(this)">Copy</button>
+  </div>
+  <p>Or use curl directly on the server:</p>
+  <div class="code-block">
+    # List pending devices
+curl http://127.0.0.1:18900/api/pending
+# Approve (use the full device ID from the pending list)
+curl http://127.0.0.1:18900/api/approve/&lt;full-device-id&gt;
+    <button class="copy-btn" onclick="copyText(this)">Copy</button>
+  </div>
+  <p>Once approved, refresh the dashboard and you're in.</p>
 </div>
 
 <script>
