@@ -76,7 +76,7 @@ fi
 
 # --- Create directory structure ---
 info "Setting up KroAgent directory..."
-su - "$REAL_USER" -c "mkdir -p '$INSTALL_DIR'/{web,skills}"
+su - "$REAL_USER" -c "mkdir -p '$INSTALL_DIR'/{web,skills,templates}"
 
 # --- Copy files ---
 if [ -d "$SCRIPT_DIR/bin" ]; then
@@ -87,6 +87,9 @@ if [ -d "$SCRIPT_DIR/bin" ]; then
     cp "$SCRIPT_DIR/web/setup_server.py" "$INSTALL_DIR/web/setup_server.py"
     if [ -d "$SCRIPT_DIR/skills" ]; then
         cp -r "$SCRIPT_DIR/skills/"* "$INSTALL_DIR/skills/" 2>/dev/null || true
+    fi
+    if [ -d "$SCRIPT_DIR/templates" ]; then
+        cp -r "$SCRIPT_DIR/templates/"* "$INSTALL_DIR/templates/" 2>/dev/null || true
     fi
 else
     error "Source files not found. Run from the kroagent source directory."
@@ -208,25 +211,27 @@ cat > "${REAL_HOME}/.config/kroagents/config.json" << CFGEOF
 CFGEOF
 chown "$REAL_USER:$REAL_USER" "${REAL_HOME}/.config/kroagents/config.json"
 
-# --- Start dashboard ---
-info "Starting dashboard..."
-su - "$REAL_USER" -c "
-    DASHBOARD_PORT=18900 \
-    KROAGENTS_DIR='$INSTALL_DIR' \
-    DASHBOARD_BIND=127.0.0.1 \
-    nohup python3 '$INSTALL_DIR/web/dashboard_server.py' \
-        > /tmp/kroagent-dashboard.log 2>&1 &
-"
-ok "Dashboard started on port 18900"
+# --- Install systemd services ---
+info "Setting up systemd services..."
 
-# --- Start setup server ---
-info "Starting setup server..."
-KROAGENT_CERTS_DIR="$CERTS_DIR" \
-KROAGENT_DASHBOARD_DOMAIN="$DASHBOARD_DOMAIN" \
-DASHBOARD_PORT=443 \
-nohup python3 "$INSTALL_DIR/web/setup_server.py" \
-    > /tmp/kroagent-setup.log 2>&1 &
-ok "Setup server started on port 80"
+# Dashboard service
+sed -e "s|{{USER}}|$REAL_USER|g" \
+    -e "s|{{HOME}}|$REAL_HOME|g" \
+    -e "s|{{INSTALL_DIR}}|$INSTALL_DIR|g" \
+    "$INSTALL_DIR/templates/kroagent-dashboard.service" \
+    > /etc/systemd/system/kroagent-dashboard.service
+
+# Setup server service
+sed -e "s|{{CERTS_DIR}}|$CERTS_DIR|g" \
+    -e "s|{{DASHBOARD_DOMAIN}}|$DASHBOARD_DOMAIN|g" \
+    -e "s|{{INSTALL_DIR}}|$INSTALL_DIR|g" \
+    "$INSTALL_DIR/templates/kroagent-setup.service" \
+    > /etc/systemd/system/kroagent-setup.service
+
+systemctl daemon-reload
+systemctl enable --now kroagent-dashboard
+systemctl enable --now kroagent-setup
+ok "Services installed and started (will survive reboot)"
 
 # --- Done ---
 SERVER_IP=$(python3 -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('8.8.8.8',80)); print(s.getsockname()[0]); s.close()" 2>/dev/null || echo "UNKNOWN")

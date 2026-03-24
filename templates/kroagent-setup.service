@@ -1,0 +1,17 @@
+[Unit]
+Description=KroAgent Setup Server (HTTP cert/instructions page)
+After=network.target
+
+[Service]
+Type=simple
+Environment=SETUP_PORT=80
+Environment=KROAGENT_CERTS_DIR={{CERTS_DIR}}
+Environment=KROAGENT_DASHBOARD_DOMAIN={{DASHBOARD_DOMAIN}}
+Environment=DASHBOARD_PORT=443
+ExecStart=/usr/bin/python3 {{INSTALL_DIR}}/web/setup_server.py
+Restart=on-failure
+RestartSec=5
+WorkingDirectory={{INSTALL_DIR}}
+
+[Install]
+WantedBy=multi-user.target

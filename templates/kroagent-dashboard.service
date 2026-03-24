@@ -1,15 +1,18 @@
 [Unit]
-Description=KroAgent Dashboard (multi-pane agent management UI)
+Description=KroAgent Dashboard
 After=network.target
 
 [Service]
 Type=simple
+User={{USER}}
 Environment=DASHBOARD_PORT=18900
-Environment=KROAGENTS_DIR=%h/kroagents
+Environment=KROAGENTS_DIR={{INSTALL_DIR}}
 Environment=DASHBOARD_BIND=127.0.0.1
-ExecStart=/usr/bin/python3 %h/kroagents/web/dashboard_server.py
+Environment=PATH={{HOME}}/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 {{INSTALL_DIR}}/web/dashboard_server.py
 Restart=on-failure
 RestartSec=5
+WorkingDirectory={{INSTALL_DIR}}
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
