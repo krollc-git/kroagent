@@ -142,7 +142,8 @@ class Handler(BaseHTTPRequestHandler):
 
         elif parsed.path == "/key":
             key = body.get("key", "")
-            allowed = {"Escape", "C-c", "Enter", "Space", "Up", "Down", "Left", "Right", "Tab"}
+            allowed = {"Escape", "C-c", "Enter", "Space", "Up", "Down", "Left", "Right", "Tab",
+                       "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
             if key not in allowed:
                 self._json(400, {"error": f"key not allowed: {key}"})
                 return

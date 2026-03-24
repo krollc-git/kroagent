@@ -775,6 +775,10 @@ function renderGrid() {
           <button onclick="sendAgentKey('${name}','Up')" title="Up arrow">↑</button>
           <button onclick="sendAgentKey('${name}','Down')" title="Down arrow">↓</button>
           <button onclick="sendAgentKey('${name}','Tab')" title="Tab">Tab</button>
+          <button onclick="sendAgentKey('${name}','0')" title="0">0</button>
+          <button onclick="sendAgentKey('${name}','1')" title="1">1</button>
+          <button onclick="sendAgentKey('${name}','2')" title="2">2</button>
+          <button onclick="sendAgentKey('${name}','3')" title="3">3</button>
           <span class="sep">|</span>
           <button onclick="refreshPane('${name}')" title="Refresh">↻</button>
           <button onclick="togglePaneAutoRefresh('${name}')" id="auto-btn-${name}" class="auto-btn active" title="Toggle auto-refresh">Auto: ON</button>
