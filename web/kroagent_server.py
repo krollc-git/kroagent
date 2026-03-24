@@ -65,6 +65,18 @@ def send_key_to_pane(key):
         return False
 
 
+def resize_pane(cols, rows):
+    """Resize the tmux pane to the given dimensions."""
+    try:
+        subprocess.run(
+            ["tmux", "resize-window", "-t", TMUX_SESSION, "-x", str(cols), "-y", str(rows)],
+            capture_output=True, text=True, timeout=5
+        )
+        return True
+    except Exception:
+        return False
+
+
 def get_session_status():
     try:
         result = subprocess.run(
@@ -139,6 +151,14 @@ class Handler(BaseHTTPRequestHandler):
             filepath = UPLOADS_DIR / filename
             filepath.write_bytes(base64.b64decode(image_b64))
             self._json(200, {"path": str(filepath), "filename": filename})
+
+        elif parsed.path == "/resize":
+            cols = body.get("cols", 80)
+            rows = body.get("rows", 24)
+            cols = max(40, min(400, int(cols)))
+            rows = max(10, min(200, int(rows)))
+            ok = resize_pane(cols, rows)
+            self._json(200, {"resized": ok, "cols": cols, "rows": rows})
 
         elif parsed.path == "/key":
             key = body.get("key", "")

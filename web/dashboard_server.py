@@ -749,7 +749,7 @@ function renderGrid() {
     const name = agent.name;
 
     if (!paneStates[name]) {
-      paneStates[name] = {lastBuffer: '', userScrolled: false, pendingImage: null, autoRefresh: true, refreshTimer: null, lastActivity: Date.now(), lastChange: Date.now()};
+      paneStates[name] = {lastBuffer: '', userScrolled: false, pendingImage: null, autoRefresh: true, refreshTimer: null, lastActivity: Date.now(), lastChange: Date.now(), inputHistory: [], historyIndex: -1};
     }
 
     const pane = document.createElement('div');
@@ -849,6 +849,9 @@ function renderGrid() {
 
     // Start per-pane auto-refresh timer
     startPaneTimer(name);
+
+    // Resize tmux to match pane width
+    setTimeout(() => resizeAgentTmux(name), 200);
   }
 }
 
@@ -1123,6 +1126,29 @@ function swapPanes(nameA, nameB) {
 // --- Fullscreen ---
 let fullscreenAgent = null;
 
+function resizeAgentTmux(name) {
+  const term = document.getElementById('term-' + name);
+  if (!term) return;
+  // Measure character width using a hidden span
+  const measure = document.createElement('span');
+  measure.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font-family:inherit;font-size:' + getComputedStyle(term).fontSize;
+  measure.textContent = 'M'.repeat(50);
+  term.appendChild(measure);
+  const charWidth = measure.offsetWidth / 50;
+  const lineHeight = parseFloat(getComputedStyle(term).lineHeight) || parseFloat(getComputedStyle(term).fontSize) * 1.4;
+  measure.remove();
+
+  const cols = Math.floor(term.clientWidth / charWidth) - 1;
+  const rows = Math.floor(term.clientHeight / lineHeight) - 1;
+  if (cols > 20 && rows > 5) {
+    fetch(`/api/agents/${name}/resize`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({cols: cols, rows: rows, device_id: deviceId})
+    }).catch(() => {});
+  }
+}
+
 function toggleFullscreen(name) {
   const grid = document.getElementById('grid');
   const pane = document.getElementById('pane-' + name);
@@ -1133,6 +1159,10 @@ function toggleFullscreen(name) {
     pane.classList.remove('fullscreen');
     grid.classList.remove('has-fullscreen');
     fullscreenAgent = null;
+    // Resize all visible agents back to grid size
+    setTimeout(() => {
+      agents.forEach(a => resizeAgentTmux(a.name));
+    }, 100);
   } else {
     // Exit previous fullscreen if any
     if (fullscreenAgent) {
@@ -1151,6 +1181,8 @@ function toggleFullscreen(name) {
     if (term && !paneStates[name]?.userScrolled) {
       term.scrollTop = term.scrollHeight;
     }
+    // Resize tmux to match fullscreen width
+    setTimeout(() => resizeAgentTmux(name), 100);
   }
 }
 
@@ -1640,6 +1672,7 @@ document.getElementById('ca-workdir')?.addEventListener('input', function() {
 checkDashboardPairing();
 
 // On window resize, scroll all non-user-scrolled panes to bottom
+let resizeDebounce = null;
 window.addEventListener('resize', () => {
   for (const name in paneStates) {
     if (!paneStates[name].userScrolled) {
@@ -1647,6 +1680,15 @@ window.addEventListener('resize', () => {
       if (term) term.scrollTop = term.scrollHeight;
     }
   }
+  // Debounce tmux resize
+  clearTimeout(resizeDebounce);
+  resizeDebounce = setTimeout(() => {
+    if (fullscreenAgent) {
+      resizeAgentTmux(fullscreenAgent);
+    } else {
+      agents.forEach(a => resizeAgentTmux(a.name));
+    }
+  }, 300);
 });
 
 // Reload agents list every 30s (in case agents are started/stopped)
@@ -1913,6 +1955,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             steps = create_agent(name, description, int(port), workdir)
             all_ok = all(s["ok"] for s in steps)
             self._json(200, {"success": all_ok, "steps": steps, "agent": name, "port": port})
+
+        elif parsed.path.startswith("/api/agents/") and "/resize" in parsed.path:
+            device_id = body.get("device_id", "")
+            if not _is_paired(device_id):
+                self._json(403, {"error": "not paired"})
+                return
+            name = parsed.path.split("/api/agents/")[1].split("/resize")[0]
+            port = self._get_agent_port(name)
+            if not port:
+                self._json(404, {"error": "agent not found"})
+                return
+            result = proxy_to_agent(port, "/resize", method="POST", body=body)
+            self._json(200, result)
 
         elif parsed.path.startswith("/api/agents/") and "/delete" in parsed.path:
             device_id = body.get("device_id", "")
